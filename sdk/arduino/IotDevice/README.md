@@ -18,8 +18,11 @@ Arduino-библиотека для подключения ESP32 и ESP8266 к I
 
 ## Установка
 
-**Arduino IDE:** скопируйте папку `IotDevice` в `~/Arduino/libraries/` (или Sketch → Include Library → Add .ZIP),
-установите PubSubClient через менеджер библиотек. Примеры появятся в File → Examples → IotDevice.
+Сервер, к которому подключается библиотека: [iot-stack](https://github.com/andrk774/iot-stack).
+
+**Arduino IDE:** скачайте [ZIP этого репозитория](https://github.com/andrk774/IotDevice/archive/refs/heads/main.zip)
+и добавьте через Sketch → Include Library → Add .ZIP Library, затем установите PubSubClient через менеджер библиотек.
+Примеры появятся в File → Examples → IotDevice.
 
 **PlatformIO:**
 ```ini
@@ -29,7 +32,7 @@ board = esp32dev
 framework = arduino
 lib_deps =
   knolleary/PubSubClient@^2.8
-  symlink://../iot-stack/sdk/arduino/IotDevice
+  https://github.com/andrk774/IotDevice.git
 
 [env:d1_mini]
 platform = espressif8266
@@ -38,7 +41,7 @@ framework = arduino
 board_build.filesystem = littlefs
 lib_deps =
   knolleary/PubSubClient@^2.8
-  symlink://../iot-stack/sdk/arduino/IotDevice
+  https://github.com/andrk774/IotDevice.git
 ```
 
 Стандартная платформа `espressif32` в PlatformIO ставит Arduino core 2.x, а SDK сверялся с API core 3.x.
