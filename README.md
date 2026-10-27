@@ -153,7 +153,7 @@ docker compose start backend ingest scenarios
 
 | SDK | Где | Для чего |
 |---|---|---|
-| `sdk/arduino/IotDevice` | Arduino IDE / PlatformIO | ESP32 и ESP8266: привязка, портал настройки Wi-Fi и токена, MQTT over TLS, свойства |
+| `sdk/arduino/IotDevice` | Arduino IDE / PlatformIO | ESP32 и ESP8266: привязка, портал настройки Wi-Fi и токена, MQTT over TLS, свойства. Для установки по ссылке — отдельный репозиторий [andrk774/IotDevice](https://github.com/andrk774/IotDevice) |
 | `sdk/node` | Node.js 18+ | Raspberry Pi и любой Linux |
 | `sdk/python` | Python 3.9+, paho-mqtt 2 | Raspberry Pi и любой Linux |
 
