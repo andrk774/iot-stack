@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iot-device-sdk"
+version = "0.1.0"
+description = "SDK устройства для IoT Stack: привязка по claim-токену, MQTT over TLS, типизированные свойства"
+requires-python = ">=3.9"
+dependencies = ["paho-mqtt>=2.0"]
+license = { text = "MIT" }
+
+[tool.setuptools]
+packages = ["iot_device"]

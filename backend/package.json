@@ -1,0 +1,17 @@
+{
+  "name": "iot-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/*.test.js",
+    "fake-device": "node scripts/fake-device.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1",
+    "pg": "^8.13.1"
+  }
+}

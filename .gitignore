@@ -1,0 +1,8 @@
+.env
+data/
+node_modules/
+sdk/arduino/IotDevice/test/host/build/
+__pycache__/
+*.egg-info/
+iot-credentials.json
+*.zip

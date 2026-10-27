@@ -1,0 +1,30 @@
+# Фрагмент конфигурации ESPHome для работы через мост esphome (MQTT discovery).
+# Вместо api: используйте mqtt: с адресом домашнего mosquitto.
+esphome:
+  name: greenhouse
+
+esp32:
+  board: esp32dev
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+mqtt:
+  broker: 192.168.1.10        # машина, где запущен bridges/home
+  discovery: true
+  discovery_prefix: homeassistant
+
+sensor:
+  - platform: dht
+    pin: GPIO4
+    temperature:
+      name: "Temperature"
+    humidity:
+      name: "Humidity"
+    update_interval: 30s
+
+switch:
+  - platform: gpio
+    pin: GPIO2
+    name: "Fan"

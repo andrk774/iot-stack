@@ -1,0 +1,231 @@
+// Демо-сервер панели без бэкенда: статика + REST в памяти + мини-брокер MQTT over WebSocket.
+//   node web/dev/mock-server.js   ->  http://localhost:8080  (любой email, пароль от 8 символов)
+// Нужен для разработки интерфейса и снимков экрана; к настоящей платформе отношения не имеет.
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PUBLIC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../public');
+const PORT = Number(process.env.PORT || 8080);
+const USER = { id: '6f1c2b3a-1111-4222-8333-944455556666', email: 'demo@example.com' };
+const now = () => new Date().toISOString();
+const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
+
+const devices = new Map([
+  ['d1a2b3c4d5e6f7081', {
+    id: 'd1a2b3c4d5e6f7081', name: 'Теплица', state: 'ready', provisioned: true, bridge_id: null, created_at: ago(86400 * 20), last_seen: ago(4),
+    meta: { name: 'Теплица', fw: '1.2.0', props: {
+      temperature: { type: 'float', unit: '°C' }, humidity: { type: 'float', unit: '%' },
+      target: { type: 'float', unit: '°C', settable: true, min: 5, max: 30 },
+      heater: { type: 'boolean', settable: true }, mode: { type: 'string', settable: true },
+    } },
+    last_values: { temperature: 24.6, humidity: 61, target: 22, heater: 0, mode: 'heat' },
+  }],
+  ['d9f8e7d6c5b4a3920', {
+    id: 'd9f8e7d6c5b4a3920', name: 'Котельная', state: 'lost', provisioned: true, bridge_id: null, created_at: ago(86400 * 40), last_seen: ago(3600 * 5),
+    meta: { name: 'Котельная', fw: '0.9.1', props: { water_temp: { type: 'float', unit: '°C' }, pump: { type: 'boolean', settable: true }, rssi: { type: 'integer', unit: 'dBm' } } },
+    last_values: { water_temp: 58.2, pump: 1, rssi: -71 },
+  }],
+  ['d00112233aabbccdd', {
+    id: 'd00112233aabbccdd', name: 'kitchen/sensor', state: 'ready', provisioned: true, bridge_id: 'b00112233445566ff', created_at: ago(86400 * 3), last_seen: ago(40),
+    meta: { name: 'kitchen/sensor', fw: 'bridge:zigbee2mqtt', props: { temperature: { type: 'float', unit: '°C' }, humidity: { type: 'float', unit: '%' }, battery: { type: 'float', unit: '%', min: 0, max: 100 } } },
+    last_values: { temperature: 21.4, humidity: 48, battery: 87 },
+  }],
+  ['d55aa55aa55aa55aa', {
+    id: 'd55aa55aa55aa55aa', name: 'Розетка в гараже', state: 'new', provisioned: false, bridge_id: null, created_at: ago(600), last_seen: null, meta: null, last_values: {},
+  }],
+]);
+const scenarios = new Map([
+  ['3d9a7c1e-0000-4000-8000-000000000001', {
+    id: '3d9a7c1e-0000-4000-8000-000000000001', name: 'Проветрить теплицу', enabled: true, cooldown_sec: 300,
+    trigger: { type: 'property', device_id: 'd1a2b3c4d5e6f7081', property: 'temperature', op: 'gt', value: 30 },
+    conditions: [], actions: [{ type: 'set', device_id: 'd1a2b3c4d5e6f7081', property: 'heater', value: false }, { type: 'notify', level: 'warning', message: '{device}: {value} °C' }],
+    last_run_at: ago(7200), last_error: null,
+  }],
+  ['3d9a7c1e-0000-4000-8000-000000000002', {
+    id: '3d9a7c1e-0000-4000-8000-000000000002', name: 'Котельная пропала', enabled: true, cooldown_sec: 0,
+    trigger: { type: 'state', device_id: 'd9f8e7d6c5b4a3920', state: 'lost' }, conditions: [],
+    actions: [{ type: 'notify', level: 'alert', message: '{device} не на связи' }], last_run_at: ago(3600 * 5), last_error: null,
+  }],
+  ['3d9a7c1e-0000-4000-8000-000000000003', {
+    id: '3d9a7c1e-0000-4000-8000-000000000003', name: 'Полив утром', enabled: false, cooldown_sec: 0,
+    trigger: { type: 'schedule', cron: '0 7 * * *', tz: 'Asia/Yekaterinburg' }, conditions: [],
+    actions: [{ type: 'set', device_id: 'd9f8e7d6c5b4a3920', property: 'pump', value: true }], last_run_at: null, last_error: 'set: mqtt not connected',
+  }],
+]);
+let notifications = [
+  { id: 3, level: 'alert', message: 'Котельная не на связи', created_at: ago(3600 * 5), read_at: null, scenario_id: '3d9a7c1e-0000-4000-8000-000000000002', scenario_name: 'Котельная пропала' },
+  { id: 2, level: 'warning', message: 'Теплица: 31.2 °C', created_at: ago(7200), read_at: null, scenario_id: '3d9a7c1e-0000-4000-8000-000000000001', scenario_name: 'Проветрить теплицу' },
+  { id: 1, level: 'info', message: 'Тестовое уведомление', created_at: ago(86400), read_at: ago(80000), scenario_id: null },
+];
+const bridges = new Map([
+  ['b00112233445566ff', { id: 'b00112233445566ff', name: 'Zigbee дома', type: 'zigbee2mqtt', config: { base_topic: 'zigbee2mqtt' }, state: 'ready', last_seen: ago(40), created_at: ago(86400 * 3), device_count: 1 }],
+]);
+
+// ---------- мини-брокер ----------
+const sockets = new Set();
+function wsFrame(data) {
+  const len = data.length;
+  const head = len < 126 ? Buffer.from([0x82, len]) : len < 65536 ? Buffer.from([0x82, 126, len >> 8, len & 0xff]) : null;
+  return Buffer.concat([head, data]);
+}
+function mqttPublish(topic, payload) {
+  const t = Buffer.from(topic);
+  const p = Buffer.from(payload);
+  const body = Buffer.concat([Buffer.from([t.length >> 8, t.length & 0xff]), t, p]);
+  const rl = [];
+  let n = body.length;
+  do { let b = n % 128; n = Math.floor(n / 128); if (n) b |= 0x80; rl.push(b); } while (n);
+  return Buffer.concat([Buffer.from([0x30, ...rl]), body]);
+}
+function broadcast(topic, payload) {
+  for (const s of sockets) if (s.subs.some((f) => f === '#' || topic.startsWith(f.replace(/#$/, '')))) s.write(wsFrame(mqttPublish(topic, payload)));
+}
+function handleMqtt(sock, pkt) {
+  const type = pkt[0] >> 4;
+  if (type === 1) sock.write(wsFrame(Buffer.from([0x20, 0x02, 0x00, 0x00])));
+  if (type === 8) {
+    let i = 1; while (pkt[i] & 0x80) i++; i++;
+    const id = [pkt[i], pkt[i + 1]]; i += 2;
+    const codes = [];
+    while (i < pkt.length) { const l = (pkt[i] << 8) | pkt[i + 1]; sock.subs.push(pkt.slice(i + 2, i + 2 + l).toString()); i += 2 + l + 1; codes.push(1); }
+    sock.write(wsFrame(Buffer.from([0x90, 2 + codes.length, ...id, ...codes])));
+  }
+  if (type === 12) sock.write(wsFrame(Buffer.from([0xd0, 0x00])));
+}
+function upgrade(req, sock) {
+  const accept = crypto.createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: mqtt\r\n\r\n`);
+  sock.subs = [];
+  sockets.add(sock);
+  let buf = Buffer.alloc(0);
+  sock.on('data', (chunk) => {
+    buf = Buffer.concat([buf, chunk]);
+    while (buf.length >= 2) {
+      let len = buf[1] & 0x7f;
+      let off = 2;
+      if (len === 126) { len = buf.readUInt16BE(2); off = 4; }
+      if (buf.length < off + 4 + len) return;
+      const mask = buf.subarray(off, off + 4);
+      const data = Buffer.from(buf.subarray(off + 4, off + 4 + len)).map((b, i) => b ^ mask[i % 4]);
+      const op = buf[0] & 0x0f;
+      buf = buf.subarray(off + 4 + len);
+      if (op === 8) { sock.end(); return; }
+      if (op === 2) handleMqtt(sock, data);
+    }
+  });
+  sock.on('close', () => sockets.delete(sock));
+  sock.on('error', () => sockets.delete(sock));
+}
+setInterval(() => {
+  const d = devices.get('d1a2b3c4d5e6f7081');
+  d.last_values.temperature = Math.round((d.last_values.temperature + (Math.random() - 0.5) * 0.4) * 100) / 100;
+  broadcast(`dev/${d.id}/temperature`, String(d.last_values.temperature));
+}, 3000);
+
+// ---------- REST ----------
+const json = (res, status, body) => {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(body === undefined ? '' : JSON.stringify(body));
+};
+const readBody = (req) => new Promise((r) => { let s = ''; req.on('data', (c) => { s += c; }); req.on('end', () => { try { r(s ? JSON.parse(s) : {}); } catch { r({}); } }); });
+const rid = (p, n) => p + crypto.randomBytes(n).toString('hex');
+
+function telemetry(id, q) {
+  const from = Date.parse(q.get('from')) || Date.now() - 86400e3;
+  const to = Date.parse(q.get('to')) || Date.now();
+  const prop = q.get('property');
+  const spec = devices.get(id)?.meta?.props?.[prop];
+  const n = q.get('bucket') ? 96 : 120;
+  const points = [];
+  for (let i = 0; i < n; i++) {
+    const t = from + ((to - from) * i) / (n - 1);
+    const phase = (t / 3600e3) * (Math.PI / 12);
+    const v = spec?.type === 'boolean' ? (Math.sin(phase * 3) > 0.3 ? 1 : 0) : 22 + 4 * Math.sin(phase) + Math.random() * 0.6;
+    points.push(q.get('bucket') ? { t: new Date(t).toISOString(), avg: v, min: v - 0.8, max: v + 0.8, n: 12 } : { t: new Date(t).toISOString(), v, s: null });
+  }
+  return { property: prop, points };
+}
+
+async function api(req, res, url) {
+  const p = url.pathname;
+  const m = (re) => re.exec(p);
+  const body = ['POST', 'PUT'].includes(req.method) ? await readBody(req) : null;
+  let x;
+  if (p === '/api/auth/login' || p === '/api/auth/register') return json(res, 200, { token: 'demo.token.value', user: USER });
+  if (!req.headers.authorization) return json(res, 401, { error: 'unauthorized' });
+  if (p === '/api/me') return json(res, 200, USER);
+  if (p === '/api/devices' && req.method === 'GET') return json(res, 200, { devices: [...devices.values()] });
+  if (p === '/api/devices' && req.method === 'POST') {
+    const d = { id: rid('d', 8), name: body.name, state: 'new', provisioned: false, bridge_id: null, created_at: now(), last_seen: null, meta: null, last_values: {} };
+    devices.set(d.id, d);
+    return json(res, 201, { device: d, claim_token: crypto.randomBytes(24).toString('base64url'), claim_expires_at: new Date(Date.now() + 1800e3).toISOString() });
+  }
+  if ((x = m(/^\/api\/devices\/(\w+)\/telemetry$/))) return json(res, 200, telemetry(x[1], url.searchParams));
+  if ((x = m(/^\/api\/devices\/(\w+)\/commands$/))) {
+    const d = devices.get(x[1]);
+    setTimeout(() => { d.last_values[body.property] = body.value; broadcast(`dev/${d.id}/${body.property}`, String(body.value)); }, 400);
+    return json(res, 202, { queued: true });
+  }
+  if ((x = m(/^\/api\/devices\/(\w+)\/claim$/))) return json(res, 200, { claim_token: crypto.randomBytes(24).toString('base64url'), claim_expires_at: new Date(Date.now() + 1800e3).toISOString() });
+  if ((x = m(/^\/api\/devices\/(\w+)$/))) {
+    const d = devices.get(x[1]);
+    if (!d) return json(res, 404, { error: 'device_not_found' });
+    if (req.method === 'PUT') { d.name = body.name; return json(res, 200, d); }
+    if (req.method === 'DELETE') { devices.delete(d.id); return json(res, 204); }
+    return json(res, 200, d);
+  }
+  if (p === '/api/scenarios' && req.method === 'GET') return json(res, 200, { scenarios: [...scenarios.values()] });
+  if (p === '/api/scenarios' && req.method === 'POST') { const s = { ...body, id: crypto.randomUUID(), last_run_at: null, last_error: null }; scenarios.set(s.id, s); return json(res, 201, s); }
+  if ((x = m(/^\/api\/scenarios\/([\w-]+)\/run$/))) return json(res, 202, { queued: true });
+  if ((x = m(/^\/api\/scenarios\/([\w-]+)$/))) {
+    const s = scenarios.get(x[1]);
+    if (!s) return json(res, 404, { error: 'scenario_not_found' });
+    if (req.method === 'PUT') { Object.assign(s, body, { id: s.id }); return json(res, 200, s); }
+    if (req.method === 'DELETE') { scenarios.delete(s.id); return json(res, 204); }
+    return json(res, 200, s);
+  }
+  if (p === '/api/notifications') {
+    const unread = notifications.filter((n) => !n.read_at).length;
+    const list = url.searchParams.get('unread') === 'true' ? notifications.filter((n) => !n.read_at) : notifications;
+    return json(res, 200, { notifications: list, unread });
+  }
+  if (p === '/api/notifications/read') { notifications = notifications.map((n) => ({ ...n, read_at: n.read_at || now() })); return json(res, 200, { updated: 1 }); }
+  if (p === '/api/bridges' && req.method === 'GET') return json(res, 200, { bridges: [...bridges.values()] });
+  if (p === '/api/bridges' && req.method === 'POST') {
+    const b = { id: rid('b', 8), name: body.name, type: body.type, config: body.config, state: 'new', last_seen: null, created_at: now(), device_count: 0 };
+    bridges.set(b.id, b);
+    return json(res, 201, { bridge: b, token: crypto.randomBytes(24).toString('base64url') });
+  }
+  if ((x = m(/^\/api\/bridges\/(\w+)\/token$/))) return json(res, 200, { token: crypto.randomBytes(24).toString('base64url') });
+  if ((x = m(/^\/api\/bridges\/(\w+)$/))) {
+    const b = bridges.get(x[1]);
+    if (req.method === 'PUT') { Object.assign(b, { name: body.name, config: body.config }); return json(res, 200, b); }
+    if (req.method === 'DELETE') { bridges.delete(b.id); return json(res, 204); }
+    return json(res, 200, b);
+  }
+  return json(res, 404, { error: 'not_found' });
+}
+
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x');
+  if (url.pathname.startsWith('/api/')) return api(req, res, url);
+  const file = path.join(PUBLIC, url.pathname === '/' ? 'index.html' : path.normalize(url.pathname));
+  if (!file.startsWith(PUBLIC)) return json(res, 403, {});
+  try {
+    const data = await readFile(file);
+    res.writeHead(200, {
+      'content-type': TYPES[path.extname(file)] || 'application/octet-stream',
+      // та же политика, что отдаёт nginx в продакшене
+      'content-security-policy': `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws://${req.headers.host}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+    });
+    res.end(data);
+  } catch {
+    res.writeHead(404); res.end();
+  }
+});
+server.on('upgrade', (req, sock) => (req.url === '/mqtt' ? upgrade(req, sock) : sock.destroy()));
+server.listen(PORT, () => console.log(`mock panel on http://localhost:${PORT}`));
