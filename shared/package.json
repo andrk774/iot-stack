@@ -1,0 +1,5 @@
+{
+  "name": "iot-shared",
+  "private": true,
+  "type": "module"
+}

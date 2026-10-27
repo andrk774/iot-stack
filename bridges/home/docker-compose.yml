@@ -1,0 +1,70 @@
+# Домашний узел: zigbee2mqtt + mosquitto + мосты рядом с устройствами, платформа — на VPS.
+# Мосты ходят на VPS по https (API) и mqtts:8883 (шина), наружу из дома ничего открывать не нужно.
+#
+#   cp .env.example .env    # вписать PUBLIC_HOST и выданные в панели BRIDGE_ID/BRIDGE_TOKEN
+#   docker compose --profile zigbee up -d          # Zigbee
+#   docker compose --profile esphome up -d         # ESPHome/Tasmota (их mqtt: указывает на этот mosquitto)
+name: iot-home
+
+x-bridge: &bridge
+  build:
+    context: ..
+  image: iot/bridges:local
+  restart: unless-stopped
+  depends_on: [mosquitto]
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # только для домашней сети: не пробрасывайте этот порт на роутере
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:2.1.1
+    profiles: [zigbee]
+    restart: unless-stopped
+    depends_on: [mosquitto]
+    environment:
+      TZ: ${TZ:-Asia/Yekaterinburg}
+      ZIGBEE2MQTT_CONFIG_MQTT_SERVER: mqtt://mosquitto:1883
+      ZIGBEE2MQTT_CONFIG_SERIAL_PORT: /dev/zigbee
+      ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED: "true"
+      ZIGBEE2MQTT_CONFIG_HOMEASSISTANT_ENABLED: "false"
+    devices:
+      - ${ZIGBEE_ADAPTER:-/dev/ttyUSB0}:/dev/zigbee
+    ports:
+      - "8080:8080"   # веб-интерфейс zigbee2mqtt для сопряжения устройств
+    volumes:
+      - z2m-data:/app/data
+
+  bridge-zigbee:
+    <<: *bridge
+    profiles: [zigbee]
+    environment:
+      API_URL: https://${PUBLIC_HOST:?set PUBLIC_HOST}
+      MQTT_URL: mqtts://${PUBLIC_HOST}:8883
+      BRIDGE_ID: ${ZIGBEE_BRIDGE_ID:?выдаётся в панели}
+      BRIDGE_TOKEN: ${ZIGBEE_BRIDGE_TOKEN:?выдаётся в панели}
+      EXTERNAL_MQTT_URL: mqtt://mosquitto:1883
+      # для самоподписанного сертификата VPS: положите fullchain.pem рядом и раскомментируйте
+      # PLATFORM_CA_FILE: /certs/fullchain.pem
+      # NODE_EXTRA_CA_CERTS: /certs/fullchain.pem
+    # volumes: ["./fullchain.pem:/certs/fullchain.pem:ro"]
+
+  bridge-esphome:
+    <<: *bridge
+    profiles: [esphome]
+    environment:
+      API_URL: https://${PUBLIC_HOST:?set PUBLIC_HOST}
+      MQTT_URL: mqtts://${PUBLIC_HOST}:8883
+      BRIDGE_ID: ${ESPHOME_BRIDGE_ID:?выдаётся в панели}
+      BRIDGE_TOKEN: ${ESPHOME_BRIDGE_TOKEN:?выдаётся в панели}
+      EXTERNAL_MQTT_URL: mqtt://mosquitto:1883
+
+volumes:
+  mosquitto-data:
+  z2m-data:

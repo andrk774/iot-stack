@@ -1,0 +1,259 @@
+# IoT-платформа по мотивам 2Smart Standalone.
+# Ядро: EMQX (шина) + PostgreSQL/TimescaleDB + backend + ingest + scenarios + nginx (+ certbot, backup).
+# Мосты включаются профилями: docker compose --profile zigbee|esphome|generic up -d
+name: iot
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-bridge: &bridge
+  build:
+    context: ./bridges
+  image: iot/bridges:local
+  restart: unless-stopped
+  logging: *logging
+  depends_on:
+    backend:
+      condition: service_healthy
+    emqx:
+      condition: service_healthy
+  networks: [internal]
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_DB: iot
+      POSTGRES_USER: iot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      TS_TUNE_MEMORY: ${PG_TUNE_MEMORY:-1GB}
+      TS_TUNE_NUM_CPUS: ${PG_TUNE_CPUS:-2}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iot -d iot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: iot/backend:local
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DATABASE_URL: postgres://iot:${POSTGRES_PASSWORD}@postgres:5432/iot
+      JWT_SECRET: ${JWT_SECRET:?set in .env}
+      JWT_TTL_SEC: ${JWT_TTL_SEC:-604800}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      MAX_DEVICES_PER_USER: ${MAX_DEVICES_PER_USER:-50}
+      MAX_BRIDGE_DEVICES: ${MAX_BRIDGE_DEVICES:-300}
+      PUBLIC_HOST: ${PUBLIC_HOST:?set in .env}
+      MQTT_PUBLIC_PORT: ${MQTT_PUBLIC_PORT:-8883}
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_BACKEND_PASSWORD: ${MQTT_BACKEND_PASSWORD:?set in .env}
+      MQTT_INGEST_PASSWORD: ${MQTT_INGEST_PASSWORD:?set in .env}
+      MQTT_SCENARIOS_PASSWORD: ${MQTT_SCENARIOS_PASSWORD:?set in .env}
+      EMQX_API_URL: http://emqx:18083
+      EMQX_API_KEY: ${EMQX_API_KEY:-iot-backend}
+      EMQX_API_SECRET: ${EMQX_API_SECRET:?set in .env (запустите ./setup.sh)}
+      TZ: ${TZ:-UTC}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/api/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    networks: [internal]
+
+  emqx:
+    image: emqx/emqx:5.8.6
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      # фиксированное имя узла: иначе entrypoint возьмёт IP контейнера,
+      # и после пересоздания EMQX не откроет свои данные в томе
+      EMQX_NODE__NAME: emqx@127.0.0.1
+      EMQX_NODE__COOKIE: ${EMQX_COOKIE:?set in .env}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?set in .env}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      # создаётся ./setup.sh из EMQX_API_KEY/EMQX_API_SECRET
+      - ./data/emqx/api_keys.conf:/opt/emqx/etc/api_keys.conf:ro
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    ports:
+      # дашборд только локально: ssh -L 18083:127.0.0.1:18083 user@vps
+      - "127.0.0.1:18083:18083"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks: [internal]
+
+  ingest:
+    build: ./ingest
+    image: iot/ingest:local
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DATABASE_URL: postgres://iot:${POSTGRES_PASSWORD}@postgres:5432/iot
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_PASSWORD: ${MQTT_INGEST_PASSWORD}
+      FLUSH_MS: ${INGEST_FLUSH_MS:-1000}
+      BATCH_MAX: ${INGEST_BATCH_MAX:-1000}
+      TZ: ${TZ:-UTC}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    networks: [internal]
+
+  scenarios:
+    build:
+      context: .
+      dockerfile: scenarios/Dockerfile
+    image: iot/scenarios:local
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      DATABASE_URL: postgres://iot:${POSTGRES_PASSWORD}@postgres:5432/iot
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_PASSWORD: ${MQTT_SCENARIOS_PASSWORD}
+      # часовой пояс расписаний по умолчанию (в сценарии можно указать свой)
+      TZ: ${TZ:-UTC}
+    depends_on:
+      backend:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    networks: [internal]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    logging: *logging
+    # раз в 6 часов перечитываем сертификаты (после продления certbot)
+    command: ["/bin/sh", "-c", "while :; do sleep 6h; nginx -s reload; done & exec nginx -g 'daemon off;'"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8883:8883"   # MQTT over TLS для устройств и мостов (TLS терминирует nginx)
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./web/public:/usr/share/nginx/html:ro
+      - ./data/certbot/conf:/etc/letsencrypt:ro
+      - ./data/certbot/www:/var/www/certbot:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    networks: [internal]
+
+  certbot:
+    image: certbot/certbot:v2.11.0
+    restart: unless-stopped
+    logging: *logging
+    entrypoint: ["/bin/sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"]
+    volumes:
+      - ./data/certbot/conf:/etc/letsencrypt
+      - ./data/certbot/www:/var/www/certbot
+
+  backup:
+    build: ./backup
+    image: iot/backup:local
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      PGHOST: postgres
+      PGUSER: iot
+      PGDATABASE: iot
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_TIME: ${BACKUP_TIME:-03:30}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_PREFIX: ${S3_PREFIX:-iot-backups}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_KEEP_DAYS: ${S3_KEEP_DAYS:-30}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-}
+      AWS_DEFAULT_REGION: ${S3_REGION:-ru-1}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./data/backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  # ---------- мосты (включаются профилями) ----------
+  # Внешний брокер должен быть доступен с VPS. Если zigbee2mqtt/ESPHome дома, а платформа в облаке,
+  # запускайте мост дома: bridges/docker-compose.home.yml
+  bridge-zigbee:
+    <<: *bridge
+    profiles: [zigbee]
+    environment:
+      API_URL: http://backend:8000
+      MQTT_URL: mqtt://emqx:1883
+      BRIDGE_ID: ${ZIGBEE_BRIDGE_ID:-}
+      BRIDGE_TOKEN: ${ZIGBEE_BRIDGE_TOKEN:-}
+      EXTERNAL_MQTT_URL: ${ZIGBEE_MQTT_URL:-mqtt://host.docker.internal:1883}
+      EXTERNAL_MQTT_USERNAME: ${ZIGBEE_MQTT_USERNAME:-}
+      EXTERNAL_MQTT_PASSWORD: ${ZIGBEE_MQTT_PASSWORD:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  bridge-esphome:
+    <<: *bridge
+    profiles: [esphome]
+    environment:
+      API_URL: http://backend:8000
+      MQTT_URL: mqtt://emqx:1883
+      BRIDGE_ID: ${ESPHOME_BRIDGE_ID:-}
+      BRIDGE_TOKEN: ${ESPHOME_BRIDGE_TOKEN:-}
+      EXTERNAL_MQTT_URL: ${ESPHOME_MQTT_URL:-mqtt://host.docker.internal:1883}
+      EXTERNAL_MQTT_USERNAME: ${ESPHOME_MQTT_USERNAME:-}
+      EXTERNAL_MQTT_PASSWORD: ${ESPHOME_MQTT_PASSWORD:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  bridge-generic:
+    <<: *bridge
+    profiles: [generic]
+    environment:
+      API_URL: http://backend:8000
+      MQTT_URL: mqtt://emqx:1883
+      BRIDGE_ID: ${GENERIC_BRIDGE_ID:-}
+      BRIDGE_TOKEN: ${GENERIC_BRIDGE_TOKEN:-}
+      EXTERNAL_MQTT_URL: ${GENERIC_MQTT_URL:-mqtt://host.docker.internal:1883}
+      EXTERNAL_MQTT_USERNAME: ${GENERIC_MQTT_USERNAME:-}
+      EXTERNAL_MQTT_PASSWORD: ${GENERIC_MQTT_PASSWORD:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pgdata:
+  emqx-data:
+  emqx-log:

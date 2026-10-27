@@ -1,0 +1,6 @@
+# Скрипты и конфиги должны оставаться с LF, даже если проект лежит на Windows (core.autocrlf):
+# setup.sh с CRLF на VPS падает с "bad interpreter", конфиги EMQX/nginx читаются с мусором.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.zip binary

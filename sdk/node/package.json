@@ -1,0 +1,13 @@
+{
+  "name": "iot-device-sdk",
+  "version": "0.1.0",
+  "description": "SDK устройства для IoT Stack: привязка по claim-токену, MQTT over TLS, типизированные свойства",
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js" },
+  "engines": { "node": ">=18" },
+  "files": ["index.js", "src", "examples", "README.md"],
+  "scripts": { "test": "node --test test/*.test.js" },
+  "dependencies": { "mqtt": "^5.10.1" },
+  "license": "MIT"
+}
