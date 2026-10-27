@@ -24,5 +24,6 @@
     "type": "git",
     "url": "https://github.com/andrk774/IotDevice.git"
   },
-  "homepage": "https://github.com/andrk774/iot-stack"
+  "homepage": "https://github.com/andrk774/iot-stack",
+  "license": "MIT"
 }
