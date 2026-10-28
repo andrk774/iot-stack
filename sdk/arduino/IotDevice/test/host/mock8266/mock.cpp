@@ -1,9 +1,11 @@
+#include "Updater.h"
 #include "Arduino.h"
 #include "ESP8266WiFi.h"
 #include "LittleFS.h"
 HardwareSerial Serial;
 WiFiClass WiFi;
 EspClass ESP;
+UpdaterClass Update;
 String IPAddress::toString() const { return String("192.168.4.1"); }
 unsigned long millis() { return 0; }
 void delay(uint32_t) {}

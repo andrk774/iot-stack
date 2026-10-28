@@ -4,6 +4,7 @@
 //   dev/<id>/$meta        JSON-описание свойств (retained)
 //   dev/<id>/<prop>       значение свойства
 //   dev/<id>/<prop>/set   команда от сервера
+//   dev/<id>/$ota/set     команда обновления прошивки (JSON, retained); статус — в dev/<id>/$ota
 #pragma once
 
 #include <cstdint>
@@ -58,6 +59,22 @@ std::string buildMeta(const std::string& name, const std::string& fw, const std:
 std::string buildProvisionRequest(const std::string& claimToken);
 // Достаёт строковое значение по ключу из плоского/вложенного JSON (первое вхождение).
 bool jsonGetString(const std::string& json, const std::string& key, std::string& out);
+
+bool jsonGetInt(const std::string& json, const std::string& key, long long& out);
+
+// ---- OTA ----
+struct OtaRequest {
+  std::string job;      // uuid задания
+  std::string path;     // /api/ota/<токен> на том же сервере
+  std::string md5;      // 32 hex
+  std::string version;
+  long long size = 0;
+};
+bool isOtaSetTopic(const std::string& topic, const std::string& deviceId);
+// false — команда пустая (снята сервером) или некорректная
+bool parseOtaRequest(const std::string& json, OtaRequest& out);
+// {"job":"…","status":"downloading","progress":40} / {"job":"…","status":"failed","error":"…"}
+std::string buildOtaStatus(const std::string& job, const char* status, int progress = -1, const std::string& error = "");
 
 // Настройки "ключ=значение" построчно, с экранированием \\ \n \r (файл настроек на ESP8266)
 std::string kvEncode(const std::map<std::string, std::string>& kv);

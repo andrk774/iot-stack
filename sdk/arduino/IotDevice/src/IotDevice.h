@@ -86,6 +86,10 @@ class IotDevice {
   void setConfigButton(int pin, bool activeLow = true);  // удержание 3 с при старте = сброс настроек
   void setPortal(const char* apPassword = nullptr, uint32_t timeoutSec = 300);
   void setDebug(Stream* out);               // например &Serial
+  // Обновление прошивки из панели (OTA). Выключено, пока не включите явно.
+  // Перед перезагрузкой в новую прошивку вызывается onOtaReboot (выключить нагрузку, сохранить состояние).
+  void enableOta(bool on = true) { _otaEnabled = on; }
+  void onOtaReboot(std::function<void()> cb) { _onOtaReboot = cb; }
 
   void onStateChange(std::function<void(State)> cb) { _onState = cb; }
 
@@ -127,6 +131,10 @@ class IotDevice {
   void saveCredentials();
   std::vector<iot::PropSpec> metaSpecs() const;
   void configError(const char* fmt, ...);
+  void handleOtaCommand(const std::string& json);
+  void runOta();
+  void reportOta(const std::string& job, const char* status, int progress = -1, const String& error = String());
+  void reportOtaAfterReboot();
   void log(const char* fmt, ...);
 
   String _name, _fw;
@@ -162,4 +170,10 @@ class IotDevice {
   bool _everOnline = false;
   bool _timeSynced = false;
   std::function<void(State)> _onState;
+
+  bool _otaEnabled = false;
+  bool _otaPending = false;
+  iot::OtaRequest _ota;
+  String _otaUnsent;                  // отчёт, который не удалось отправить (MQTT был закрыт)
+  std::function<void()> _onOtaReboot;
 };

@@ -426,7 +426,138 @@ bool IotDevice::connectMqtt() {
     return false;
   }
   log("[iot] MQTT: онлайн, топики dev/%s/...", id.c_str());
+  reportOtaAfterReboot();
+  if (!_otaUnsent.isEmpty() && publish(iot::topic(id, "$ota"), _otaUnsent, false)) _otaUnsent = "";
   return true;
+}
+
+// =========================== OTA ===========================
+// Сервер публикует retained-команду dev/<id>/$ota/set — она придёт и после переподключения.
+// Чтобы не прошиваться по кругу, id задания запоминается в NVS до скачивания: повторно
+// то же задание не выполняется. Итог (done/failed) устройство сообщает после перезагрузки,
+// сравнив свою версию с ожидаемой.
+
+void IotDevice::reportOta(const std::string& job, const char* status, int progress, const String& error) {
+  const String msg = S(iot::buildOtaStatus(job, status, progress, Std(error)));
+  if (!publish(iot::topic(Std(_deviceId), "$ota"), msg, false)) _otaUnsent = msg;
+}
+
+void IotDevice::handleOtaCommand(const std::string& json) {
+  if (json.empty()) {  // сервер снял команду (отменено или завершено)
+    if (_otaPending) log("[iot] OTA: задание отменено");
+    _otaPending = false;
+    return;
+  }
+  iot::OtaRequest req;
+  if (!iot::parseOtaRequest(json, req)) {
+    log("[iot] OTA: некорректная команда");
+    return;
+  }
+  if (_prefs.isKey("otaJob") && Std(_prefs.getString("otaJob")) == req.job) return;  // уже выполнялось
+  if (!_otaEnabled) {
+    log("[iot] OTA: обновление выключено в прошивке (enableOta)");
+    _prefs.putString("otaJob", S(req.job));
+    reportOta(req.job, "failed", -1, "OTA выключено в прошивке устройства (enableOta)");
+    return;
+  }
+  if (S(req.version) == _fw) {
+    log("[iot] OTA: версия %s уже установлена", _fw.c_str());
+    _prefs.putString("otaJob", S(req.job));
+    reportOta(req.job, "done", 100);
+    return;
+  }
+  log("[iot] OTA: задание на версию %s (%lld байт)", req.version.c_str(), req.size);
+  _ota = req;
+  _otaPending = true;  // выполняем из loop(), не из обработчика MQTT
+}
+
+void IotDevice::reportOtaAfterReboot() {
+  if (!_prefs.isKey("otaVer")) return;
+  const String want = _prefs.getString("otaVer");
+  const std::string job = _prefs.isKey("otaJob") ? Std(_prefs.getString("otaJob")) : std::string();
+  _prefs.remove("otaVer");
+  if (job.empty()) return;
+  if (want == _fw) {
+    log("[iot] OTA: работает новая прошивка %s", _fw.c_str());
+    reportOta(job, "done", 100);
+  } else {
+    reportOta(job, "failed", -1, "после перезагрузки версия " + _fw + ", ожидалась " + want + " (загрузчик откатил прошивку?)");
+  }
+}
+
+void IotDevice::runOta() {
+  _otaPending = false;
+  const iot::OtaRequest req = _ota;
+  // сначала запоминаем задание: если новая прошивка не загрузится, повторять его не будем
+  _prefs.putString("otaJob", S(req.job));
+  reportOta(req.job, "downloading", 0);
+
+  auto fail = [&](const String& why) {
+    log("[iot] OTA: ошибка: %s", why.c_str());
+    reportOta(req.job, "failed", -1, why);
+  };
+
+#if defined(ESP8266)
+  // на ESP8266 памяти на два TLS-соединения не хватает: MQTT закрываем, вернётся сам после ошибки
+  _mqtt.disconnect();
+  _tls.stop();
+#endif
+
+  WiFiClientSecure client;
+  applyTls(client);
+  HTTPClient http;
+#if defined(ESP32)
+  http.setConnectTimeout(8000);
+#endif
+  http.setTimeout(15000);
+  const String url = "https://" + _cfg.host + S(req.path);
+  if (!http.begin(client, url)) { fail("не удалось начать HTTP-запрос"); return; }
+  const int code = http.GET();
+  if (code != 200) {
+    http.end();
+    fail(code < 0 ? String("сеть/TLS, код ") + String(code) : String("HTTP ") + String(code));
+    return;
+  }
+  const int len = http.getSize();
+  if (len != static_cast<int>(req.size)) {
+    http.end();
+    fail(String("размер ") + String(len) + ", ожидался " + String(static_cast<long>(req.size)));
+    return;
+  }
+  if (!Update.begin(static_cast<size_t>(req.size))) {
+    http.end();
+    fail("нет места под прошивку: " + IOT_UPDATE_ERROR());
+    return;
+  }
+  Update.setMD5(req.md5.c_str());
+  int lastStep = 0;
+  Update.onProgress([&](size_t done, size_t total) {
+    const int pct = total ? static_cast<int>(done * 100 / total) : 0;
+    if (pct / 10 > lastStep && _mqtt.connected()) {
+      lastStep = pct / 10;
+      reportOta(req.job, "downloading", pct);
+      _mqtt.loop();
+    }
+  });
+  const size_t written = Update.writeStream(*http.getStreamPtr());
+  http.end();
+  Update.onProgress(nullptr);  // лямбда ссылается на локальные переменные
+  const bool ended = Update.end();  // вызываем всегда: при недописанном образе это сбрасывает Update
+  if (written != static_cast<size_t>(req.size) || !ended) {
+    fail(String("запись прошивки: ") + IOT_UPDATE_ERROR() + " (записано " + String(static_cast<unsigned long>(written)) + ")");
+    return;
+  }
+  _prefs.putString("otaVer", S(req.version));
+  log("[iot] OTA: прошивка %s записана, перезагрузка", req.version.c_str());
+  reportOta(req.job, "rebooting", 100);
+  if (_mqtt.connected()) {
+    publish(iot::topic(Std(_deviceId), "$state"), "disconnected", true);
+    _mqtt.disconnect();
+  }
+  _otaUnsent = "";
+  if (_onOtaReboot) _onOtaReboot();
+  delay(200);
+  ESP.restart();
 }
 
 bool IotDevice::publish(const std::string& topic, const String& payload, bool retained) {
@@ -449,9 +580,13 @@ bool IotDevice::publishState(const char* state) {
 
 void IotDevice::onMqttMessage(char* topic, uint8_t* payload, unsigned int len) {
   // topic и payload лежат в буфере PubSubClient — копируем до любых publish
+  std::string raw(reinterpret_cast<const char*>(payload), len);
+  if (iot::isOtaSetTopic(topic, Std(_deviceId))) {
+    handleOtaCommand(raw);
+    return;
+  }
   std::string prop;
   if (!iot::parseSetTopic(topic, Std(_deviceId), prop)) return;
-  std::string raw(reinterpret_cast<const char*>(payload), len);
 
   IotProperty* p = nullptr;
   for (auto* x : _props) {
@@ -559,6 +694,13 @@ void IotDevice::loop() {
       }
       for (auto* p : _props) {
         if (p->_dirty) publishProperty(*p);
+      }
+      if (_otaPending) {
+        runOta();
+        if (!_mqtt.connected()) {  // ESP8266 закрывал MQTT на время скачивания
+          _nextAttempt = millis();
+          setState(State::MqttConnecting);
+        }
       }
       return;
   }

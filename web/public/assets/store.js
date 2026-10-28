@@ -90,6 +90,13 @@ class Store {
         const meta = JSON.parse(payload);
         if (meta && typeof meta === 'object') { d.meta = meta; this.emit('device', { id, meta: true }); }
       } catch { /* мусор игнорируем */ }
+    } else if (leaf === '$ota') {
+      try {
+        const msg = JSON.parse(payload);
+        if (msg && typeof msg === 'object') this.emit('device', { id, ota: msg });
+      } catch { /* мусор игнорируем */ }
+    } else if (leaf.startsWith('$')) {
+      // прочие служебные топики не свойства
     } else {
       const type = d.meta?.props?.[leaf]?.type ?? null;
       d.last_values = { ...(d.last_values || {}), [leaf]: coerce(payload, type) };

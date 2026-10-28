@@ -112,6 +112,9 @@ const ERRORS = {
   telegram_not_configured: 'Платформенный бот не настроен: TELEGRAM_BOT_TOKEN в .env',
   telegram_unavailable: 'Бот Telegram ещё не запустился, попробуйте через минуту',
   webpush_not_configured: 'Push-уведомления не настроены на сервере',
+  firmware_not_found: 'Прошивка не найдена',
+  firmware_limit_reached: 'В библиотеке уже 20 прошивок — удалите старые',
+  payload_too_large: 'Файл слишком большой',
 };
 
 export function errorMessage(err) {
@@ -120,6 +123,18 @@ export function errorMessage(err) {
   if (code === 'validation' && err?.details?.field) msg += ` (${err.details.field})`;
   return msg;
 }
+
+export function formatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n} Б`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} КБ`;
+  return `${(n / 1024 / 1024).toFixed(2).replace('.', ',')} МБ`;
+}
+
+export const OTA_LABELS = {
+  pending: 'ждёт устройство', downloading: 'скачивает', rebooting: 'перезагружается',
+  done: 'готово', failed: 'ошибка', cancelled: 'отменено',
+};
 
 /** Окно графика -> параметры запроса телеметрии */
 export const RANGES = {

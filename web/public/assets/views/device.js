@@ -6,6 +6,7 @@ import {
   deviceProps, coerce, formatValue, relativeTime, errorMessage, RANGES, seriesFromTelemetry,
 } from '../format.js';
 import { stateBadge, showClaimToken } from './devices.js';
+import { otaPanel } from './ota.js';
 
 async function sendCommand(device, property, value) {
   try {
@@ -180,8 +181,10 @@ export function renderDevice(root, { id }) {
 
   const chartHost = h('div');
   const drawChart = () => mount(chartHost, chartPanel(device));
+  // OTA — только для устройств со своей прошивкой на нашем SDK (не через мост)
+  const ota = !device.bridge_id && device.provisioned ? otaPanel(device) : null;
 
-  mount(root, head, tiles, chartHost,
+  mount(root, head, tiles, chartHost, ota?.el,
     h('section', { class: 'panel panel-quiet' },
       h('h2', null, 'Обслуживание'),
       h('dl', { class: 'facts' },
@@ -201,7 +204,9 @@ export function renderDevice(root, { id }) {
     if ((ev === 'device' && p.id === id) || ev === 'devices') {
       device = store.devices.get(id);
       if (!device) return;
+      if (p?.ota) { ota?.live(p.ota); return; }
       drawHead();
+      if (p?.meta) ota?.setDevice(device);
       if (p?.meta || ev === 'devices') { drawTiles(); drawChart(); return; }
       if (p?.prop) {
         const old = tiles.querySelector(`[data-prop="${CSS.escape(p.prop)}"]`);

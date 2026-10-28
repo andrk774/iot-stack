@@ -149,6 +149,12 @@ function telemetry(id, q) {
   return { property: prop, points };
 }
 
+const firmwares = new Map([
+  ['f1', { id: 'f1', name: 'Теплица', version: '1.3.0', size: 912384, md5: 'a'.repeat(32), sha256: '3f9a1c0be41d7a55'.repeat(4), created_at: new Date(Date.now() - 86400e3).toISOString() }],
+]);
+const otaJobs = new Map([
+  ['d9f8e7d6c5b4a3920', { id: 'j-old', device_id: 'd9f8e7d6c5b4a3920', version: '2.0.1', status: 'failed', progress: 40, error: 'после перезагрузки версия 2.0.0, ожидалась 2.0.1 (загрузчик откатил прошивку?)', created_at: new Date(Date.now() - 7200e3).toISOString(), updated_at: new Date(Date.now() - 7000e3).toISOString() }],
+]);
 const channels = new Map([
   ['c-tg', { id: 'c-tg', type: 'telegram', name: 'Telegram: Андрей', chat_id: '5551234', chat_title: 'Андрей', own_bot: false, min_level: 'info', enabled: true, last_sent_at: new Date(Date.now() - 3600e3).toISOString(), last_error: null }],
   ['c-wh', { id: 'c-wh', type: 'webhook', name: 'hooks.example.com', url: 'https://hooks.example.com/iot', min_level: 'alert', enabled: true, last_sent_at: null, last_error: '2026-10-28T10:00:00Z: HTTP 502' }],
@@ -210,6 +216,34 @@ async function api(req, res, url) {
     if (req.method === 'PUT') { Object.assign(b, { name: body.name, config: body.config }); return json(res, 200, b); }
     if (req.method === 'DELETE') { bridges.delete(b.id); return json(res, 204); }
     return json(res, 200, b);
+  }
+  if (p === '/api/firmwares' && req.method === 'GET') return json(res, 200, { firmwares: [...firmwares.values()], max_bytes: 4 * 1024 * 1024 });
+  if (p === '/api/firmwares' && req.method === 'POST') {
+    const f = { id: crypto.randomUUID(), name: url.searchParams.get('name'), version: url.searchParams.get('version'), size: Number(req.headers['content-length'] || 0), md5: 'x'.repeat(32), sha256: crypto.randomBytes(32).toString('hex'), created_at: now() };
+    firmwares.set(f.id, f);
+    return json(res, 201, f);
+  }
+  if ((x = m(/^\/api\/firmwares\/([\w-]+)$/))) { firmwares.delete(x[1]); return json(res, 204); }
+  if ((x = m(/^\/api\/devices\/(\w+)\/ota$/))) {
+    if (req.method === 'GET') return json(res, 200, { job: otaJobs.get(x[1]) || null, current_version: devices.get(x[1])?.meta?.fw ?? null });
+    if (req.method === 'DELETE') { const j = otaJobs.get(x[1]); if (j) j.status = 'cancelled'; return json(res, 200, { cancelled: j ? 1 : 0 }); }
+    const fw = firmwares.get(body.firmware_id);
+    const job = { id: crypto.randomUUID(), device_id: x[1], firmware_id: fw.id, version: fw.version, status: 'pending', progress: null, error: null, created_at: now(), updated_at: now() };
+    otaJobs.set(x[1], job);
+    const topic = `dev/${x[1]}/$ota`;
+    let pct = 0;
+    const t = setInterval(() => {
+      if (job.status === 'cancelled') return clearInterval(t);
+      pct += 20;
+      if (pct <= 100) { job.status = 'downloading'; job.progress = pct; broadcast(topic, JSON.stringify({ job: job.id, status: 'downloading', progress: pct })); return; }
+      clearInterval(t);
+      job.status = 'done';
+      const d = devices.get(x[1]);
+      if (d.meta) d.meta.fw = fw.version;
+      broadcast(topic, JSON.stringify({ job: job.id, status: 'rebooting', progress: 100 }));
+      setTimeout(() => { broadcast(`dev/${x[1]}/$meta`, JSON.stringify(d.meta)); broadcast(topic, JSON.stringify({ job: job.id, status: 'done' })); }, 1500);
+    }, 700);
+    return json(res, 202, { job });
   }
   if (p === '/api/channels' && req.method === 'GET') return json(res, 200, { channels: [...channels.values()], telegram_bot: 'iot_demo_bot', webpush_public_key: null });
   if (p === '/api/channels' && req.method === 'POST') {

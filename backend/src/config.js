@@ -33,6 +33,8 @@ export function loadConfig(env = process.env) {
     telegramApiUrl: env.TELEGRAM_API_URL || 'https://api.telegram.org',
     // true — разрешить вебхуки на http:// и адреса внутренних сетей (только для локальной разработки)
     webhookAllowPrivate: env.WEBHOOK_ALLOW_PRIVATE === 'true',
+    // максимальный размер файла прошивки для OTA
+    firmwareMaxBytes: Math.round(Number(env.FIRMWARE_MAX_MB || 4) * 1024 * 1024),
     publicPort: 8000,
     internalPort: 8001,
   };

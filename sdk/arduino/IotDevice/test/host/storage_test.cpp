@@ -63,6 +63,9 @@ int main() {
     IotStorage s;
     assert(s.begin("iotdev"));
     assert(s.getString("mpass") == "p=ss\\word");
+    assert(s.remove("mpass") && s.remove("absent"));
+    IotStorage again;  // удаление записано на флеш
+    assert(again.begin("iotdev") && !again.isKey("mpass") && again.isKey("ssid"));
     s.clear();
     assert(!s.isKey("ssid"));
   }

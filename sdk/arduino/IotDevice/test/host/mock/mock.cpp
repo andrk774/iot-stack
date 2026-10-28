@@ -1,8 +1,10 @@
+#include "Update.h"
 #include "Arduino.h"
 #include "WiFi.h"
 HardwareSerial Serial;
 WiFiClass WiFi;
 EspClass ESP;
+UpdateClass Update;
 String IPAddress::toString() const { return String("192.168.4.1"); }
 unsigned long millis() { return 0; }
 void delay(uint32_t) {}

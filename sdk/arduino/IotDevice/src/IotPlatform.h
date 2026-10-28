@@ -7,16 +7,20 @@
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
+#include <Updater.h>           // Update (OTA)
 #include <WiFiClientSecure.h>  // BearSSL
 using IotWebServer = ESP8266WebServer;
+#define IOT_UPDATE_ERROR() Update.getErrorString()
 #define IOT_INPUT_PULLDOWN INPUT  // на ESP8266 подтяжка вниз есть только у GPIO16
 #elif defined(ESP32)
 #include <HTTPClient.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 using IotWebServer = WebServer;
 #define IOT_INPUT_PULLDOWN INPUT_PULLDOWN
+#define IOT_UPDATE_ERROR() String(Update.errorString())
 #else
 #error "IotDevice: поддерживаются ESP32 и ESP8266"
 #endif

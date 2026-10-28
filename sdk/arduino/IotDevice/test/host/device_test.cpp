@@ -41,8 +41,9 @@ static void provisionedNvs() {
   sim.nvs["cred"] = ID + "\nmqtt-pass\n";
 }
 
+// после ESP.restart() настоящее устройство дальше не выполняется — симулятор тоже останавливается
 static void run(IotDevice& dev, int steps = 300) {
-  for (int i = 0; i < steps; i++) {
+  for (int i = 0; i < steps && !sim.restarted; i++) {
     dev.loop();
     sim.millis += 10;
   }
@@ -277,6 +278,137 @@ static void testCommands() {
   CHECK(calls == 2 && sim.last(T + "level")->payload == "70" && level.value() == "70");
 }
 
+// 8. OTA: retained-команда, скачивание, MD5, отчёт после перезагрузки, защита от повторов
+static const std::string JOB = "0b8f7c1e-3a2d-4c5b-9e8f-1a2b3c4d5e6f";
+static const std::string MD5 = "0123456789abcdef0123456789abcdef";
+static std::string otaCmd(const std::string& job, const std::string& version, size_t size, const std::string& path = "/api/ota/tok_123") {
+  return "{\"job\":\"" + job + "\",\"path\":\"" + path + "\",\"size\":" + std::to_string(size) +
+         ",\"md5\":\"" + MD5 + "\",\"version\":\"" + version + "\"}";
+}
+static std::vector<std::string> otaReports() {
+  std::vector<std::string> r;
+  for (const auto& p : sim.published) if (p.topic == T + "$ota") r.push_back(p.payload);
+  return r;
+}
+static bool startsOnline(IotDevice& dev) {
+  dev.setInsecure();
+  dev.begin();
+  sim.wifiUp = true;
+  run(dev);
+  return dev.online();
+}
+
+static void testOta() {
+  // выключено в прошивке: отказ один раз, повторная доставка retained-команды — без повторного отказа
+  freshWorld();
+  provisionedNvs();
+  {
+    IotDevice dev("Тест", "1.0");
+    CHECK(startsOnline(dev));
+    sim.sendToDevice(T + "$ota/set", otaCmd(JOB, "2.0", 3000));
+    run(dev, 5);
+    CHECK(otaReports().size() == 1 && contains(otaReports()[0], "\"failed\"") && contains(otaReports()[0], "enableOta"));
+    sim.sendToDevice(T + "$ota/set", otaCmd(JOB, "2.0", 3000));
+    run(dev, 5);
+    CHECK(otaReports().size() == 1 && sim.httpGets == 0);
+  }
+
+  // успешное обновление
+  freshWorld();
+  provisionedNvs();
+  sim.otaBody = std::string(3000, '\xe9');
+  {
+    IotDevice dev("Тест", "1.0");
+    int rebootCb = 0;
+    dev.enableOta();
+    dev.onOtaReboot([&]() { rebootCb++; });
+    CHECK(startsOnline(dev));
+    sim.sendToDevice(T + "$ota/set", otaCmd(JOB, "2.0", 3000, "https://evil.example/x.bin"));  // чужой адрес — игнор
+    run(dev, 5);
+    CHECK(sim.httpGets == 0 && otaReports().empty());
+    sim.sendToDevice(T + "$ota/set", otaCmd(JOB, "2.0", 3000));
+    run(dev, 5);
+    CHECK(sim.httpGets == 1 && sim.httpLastUrl == "https://iot.test/api/ota/tok_123");
+    CHECK(sim.updateBeginSize == 3000 && sim.updateMd5 == MD5 && sim.updateWritten == sim.otaBody);
+    auto r = otaReports();
+    CHECK(r.size() >= 3 && contains(r.front(), "\"downloading\",\"progress\":0") && contains(r.back(), "\"rebooting\""));
+    CHECK(sim.updateProgressCalls >= 2);
+    CHECK(sim.nvs["otaVer"] == "2.0" && sim.nvs["otaJob"] == JOB);
+    CHECK(sim.restarted && rebootCb == 1);
+    CHECK(sim.last(T + "$state")->payload == "disconnected");
+  }
+  {  // «перезагрузка» в новую прошивку: отчёт done, retained-команда больше не выполняется
+    sim.published.clear();
+    sim.restarted = false;
+    IotDevice dev("Тест", "2.0");
+    dev.enableOta();
+    CHECK(startsOnline(dev));
+    auto r = otaReports();
+    CHECK(r.size() == 1 && contains(r[0], "\"done\"") && contains(r[0], JOB));
+    CHECK(sim.nvs.count("otaVer") == 0);
+    sim.sendToDevice(T + "$ota/set", otaCmd(JOB, "2.0", 3000));
+    run(dev, 5);
+    CHECK(sim.httpGets == 1 && otaReports().size() == 1 && !sim.restarted);
+  }
+
+  // загрузчик откатил прошивку: после перезагрузки версия старая — failed
+  freshWorld();
+  provisionedNvs();
+  sim.nvs["otaJob"] = JOB;
+  sim.nvs["otaVer"] = "2.0";
+  {
+    IotDevice dev("Тест", "1.0");
+    CHECK(startsOnline(dev));
+    auto r = otaReports();
+    CHECK(r.size() == 1 && contains(r[0], "\"failed\"") && contains(r[0], "ожидалась 2.0"));
+  }
+
+  // ошибка MD5: не перезагружается, остаётся в сети, следующее задание выполняется
+  freshWorld();
+  provisionedNvs();
+  sim.otaBody = std::string(2048, 'x');
+  sim.updateEndOk = false;
+  {
+    IotDevice dev("Тест", "1.0");
+    dev.enableOta();
+    CHECK(startsOnline(dev));
+    sim.sendToDevice(T + "$ota/set", otaCmd(JOB, "2.0", 2048));
+    run(dev, 5);
+    CHECK(!sim.restarted && dev.online() && sim.updateEnded);
+    CHECK(contains(otaReports().back(), "MD5 Check Failed"));
+    CHECK(sim.nvs.count("otaVer") == 0);
+    sim.updateEndOk = true;
+    const std::string job2 = "1b8f7c1e-3a2d-4c5b-9e8f-1a2b3c4d5e6f";
+    sim.sendToDevice(T + "$ota/set", otaCmd(job2, "2.0", 2048));
+    run(dev, 5);
+    CHECK(sim.restarted && contains(otaReports().back(), "rebooting"));
+  }
+
+  // размер не совпал / HTTP-ошибка / та же версия
+  freshWorld();
+  provisionedNvs();
+  sim.otaBody = std::string(2048, 'x');
+  {
+    IotDevice dev("Тест", "1.0");
+    dev.enableOta();
+    CHECK(startsOnline(dev));
+    sim.otaSizeOverride = 1000;
+    sim.sendToDevice(T + "$ota/set", otaCmd("2b8f7c1e-3a2d-4c5b-9e8f-1a2b3c4d5e6f", "2.0", 2048));
+    run(dev, 5);
+    CHECK(contains(otaReports().back(), "размер 1000") && sim.updateBeginSize == 0);
+    sim.otaSizeOverride = -1;
+    sim.otaCode = 404;
+    sim.sendToDevice(T + "$ota/set", otaCmd("3b8f7c1e-3a2d-4c5b-9e8f-1a2b3c4d5e6f", "2.0", 2048));
+    run(dev, 5);
+    CHECK(contains(otaReports().back(), "HTTP 404"));
+    const int gets = sim.httpGets;
+    sim.sendToDevice(T + "$ota/set", otaCmd("4b8f7c1e-3a2d-4c5b-9e8f-1a2b3c4d5e6f", "1.0", 2048));
+    run(dev, 5);
+    CHECK(sim.httpGets == gets && contains(otaReports().back(), "\"done\""));
+    CHECK(!sim.restarted && dev.online());
+  }
+}
+
 int main() {
   testInvalidProperties();
   testStartPortal();
@@ -286,6 +418,7 @@ int main() {
   testPortalReopen();
   testMetaTooLarge();
   testCommands();
+  testOta();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

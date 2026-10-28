@@ -52,6 +52,28 @@ export async function api(method, path, body) {
   return data;
 }
 
+/** Загрузка файла как есть (application/octet-stream) */
+export async function upload(path, file) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: file,
+    });
+  } catch {
+    throw new ApiError(0, 'network');
+  }
+  let data = null;
+  try { data = await res.json(); } catch { /* пусто */ }
+  if (!res.ok) {
+    if (res.status === 401 && token) setToken(null);
+    if (res.status === 413) throw new ApiError(413, 'payload_too_large');
+    throw new ApiError(res.status, data?.error || `http_${res.status}`, data?.details);
+  }
+  return data;
+}
+
 export const get = (p) => api('GET', p);
 export const post = (p, b = {}) => api('POST', p, b);
 export const put = (p, b) => api('PUT', p, b);

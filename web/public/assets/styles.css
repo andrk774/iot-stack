@@ -128,6 +128,13 @@ textarea { font-family: var(--mono); font-size: 0.875rem; width: 100%; min-heigh
 .inline-form input { flex: 1 1 90px; width: 100%; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.grid-3 { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 14px; align-items: start; }
+@media (max-width: 640px) { .grid-3 { grid-template-columns: 1fr; } }
+.tag { display: inline-block; font-family: var(--mono); font-size: 0.8125rem; padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--sunken); color: var(--ink); }
+.ota-status { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.ota-status .list-error { flex-basis: 100%; }
+progress { width: 160px; height: 8px; accent-color: var(--accent); }
+.empty-inline + * { margin-top: 0; }
 
 /* ---------- вход ---------- */
 .auth { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
