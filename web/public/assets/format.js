@@ -122,6 +122,7 @@ const ERRORS = {
   totp_not_enabled: 'Двухфакторная защита не включена',
   totp_setup_required: 'Начните подключение заново',
   session_not_found: 'Сеанс уже завершён',
+  push_denied: 'Уведомления запрещены в браузере',
 };
 
 export function errorMessage(err) {

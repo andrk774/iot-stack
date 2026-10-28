@@ -70,6 +70,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_API_URL: ${TELEGRAM_API_URL:-https://api.telegram.org}
       FIRMWARE_MAX_MB: ${FIRMWARE_MAX_MB:-4}
+      WEBPUSH_SUBJECT: ${WEBPUSH_SUBJECT:-}
       TZ: ${TZ:-UTC}
     depends_on:
       postgres:

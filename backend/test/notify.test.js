@@ -181,3 +181,75 @@ test('dispatcher: concurrent kicks collapse, failures keep going', async () => {
   await Promise.all([d.kick(), d.kick(), d.kick()]);
   assert.equal(calls, 1);
 });
+
+// ---------- web push ----------
+import {
+  encryptPayload, decryptPayload, vapidAuthorization, generateVapidKeys, checkSubscriptionKeys, createWebPush,
+} from '../src/notify/webpush.js';
+
+const u = (s) => Buffer.from(s, 'base64url');
+
+test('web push encryption matches RFC 8291 example', () => {
+  const body = encryptPayload('When I grow up, I want to be a watermelon',
+    'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4', 'BTBZMqHH6r4Tts7J_aSIgg',
+    { asKeys: { privateKey: u('yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw') }, salt: u('DGv6ra1nlYgDCS1FRnbzlw') });
+  assert.equal(body.toString('base64url'),
+    'DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN');
+});
+
+function browserSubscription() {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  return { priv: ecdh.getPrivateKey(), p256dh: ecdh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') };
+}
+
+test('web push: round trip, key checks, VAPID signature', () => {
+  const sub = browserSubscription();
+  const msg = JSON.stringify({ title: 'Тревога', body: 'Протечка в ванной' });
+  assert.equal(decryptPayload(encryptPayload(msg, sub.p256dh, sub.auth), sub.priv, sub.auth), msg);
+  assert.equal(checkSubscriptionKeys(sub.p256dh, sub.auth), true);
+  assert.equal(checkSubscriptionKeys(Buffer.alloc(65, 4).toString('base64url'), sub.auth), false); // не точка кривой
+  assert.equal(checkSubscriptionKeys(sub.p256dh, 'short'), false);
+
+  const k = generateVapidKeys();
+  const keys = { publicKey: k.publicKey, privateKeyObject: crypto.createPrivateKey(k.privatePem) };
+  const h = vapidAuthorization('https://fcm.googleapis.com/fcm/send/abc', keys, 'https://iot.example.com', 1_700_000_000_000);
+  const m = /^vapid t=([^.]+)\.([^.]+)\.([^,]+), k=(.+)$/.exec(h);
+  assert.ok(m);
+  assert.deepEqual(JSON.parse(u(m[2]).toString()), { aud: 'https://fcm.googleapis.com', exp: 1_700_000_000 + 12 * 3600, sub: 'https://iot.example.com' });
+  assert.equal(m[4], k.publicKey);
+  const raw = u(m[4]);
+  const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: raw.subarray(1, 33).toString('base64url'), y: raw.subarray(33).toString('base64url') }, format: 'jwk' });
+  assert.ok(crypto.verify('sha256', Buffer.from(`${m[1]}.${m[2]}`), { key: pub, dsaEncoding: 'ieee-p1363' }, u(m[3])));
+});
+
+test('web push service: keys persisted once, request shape, gone subscription is permanent', async () => {
+  const settings = new Map();
+  const db = {
+    async query(sql, p) {
+      if (sql.startsWith('SELECT value FROM server_settings')) return { rows: settings.has('vapid') ? [{ value: settings.get('vapid') }] : [] };
+      if (sql.startsWith('INSERT INTO server_settings')) { if (!settings.has('vapid')) settings.set('vapid', JSON.parse(p[0])); return { rows: [] }; }
+      throw new Error(sql);
+    },
+  };
+  const calls = [];
+  let status = 201;
+  const post = async (url, opts) => { calls.push({ url, opts }); return { status, body: '' }; };
+  const wp = await createWebPush({ db, subject: 'https://iot.test', post, log: {} });
+  const wp2 = await createWebPush({ db, subject: 'https://iot.test', post, log: {} });
+  assert.equal(wp.publicKey, wp2.publicKey); // ключи не пересоздаются при перезапуске
+  const sub = browserSubscription();
+  const cfg = { endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/x', p256dh: sub.p256dh, auth: sub.auth };
+  await wp.send(cfg, { id: '5', level: 'alert', message: 'Дым на кухне', scenario_name: 'Кухня' });
+  const { url, opts } = calls[0];
+  assert.equal(url, cfg.endpoint);
+  assert.equal(opts.headers['content-encoding'], 'aes128gcm');
+  assert.equal(opts.headers.urgency, 'high');
+  assert.match(opts.headers.authorization, /^vapid t=.+, k=/);
+  const payload = JSON.parse(decryptPayload(opts.body, sub.priv, sub.auth));
+  assert.deepEqual(payload, { title: '🚨 Кухня', body: 'Дым на кухне', level: 'alert', tag: 'n5', url: '/#/notifications' });
+  status = 410;
+  await assert.rejects(wp.send(cfg, { id: '6', level: 'info', message: 'x' }), PermanentError);
+  status = 500;
+  await assert.rejects(wp.send(cfg, { id: '7', level: 'info', message: 'x' }), (e) => !(e instanceof PermanentError));
+});

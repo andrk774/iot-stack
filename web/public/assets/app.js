@@ -126,3 +126,8 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 onAuthChange(() => start());
 start();
+
+// PWA: установка на главный экран, работа без сети, push-уведомления
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('service worker:', e.message));
+}

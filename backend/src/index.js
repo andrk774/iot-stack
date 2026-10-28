@@ -12,6 +12,7 @@ import { internalRoutes } from './routes/internal.js';
 import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from './routes/channels.js';
 import { TelegramApi, TelegramBot } from './notify/telegram.js';
 import { Dispatcher, makeSenders } from './notify/dispatcher.js';
+import { createWebPush } from './notify/webpush.js';
 import { otaRoutes, handleOtaStatus } from './routes/ota.js';
 import { accountRoutes } from './routes/account.js';
 
@@ -72,7 +73,15 @@ const telegramBot = config.telegramBotToken
     unlinkChat: (chatId) => unlinkTelegramChat(db, chatId),
   })
   : null;
-const senders = makeSenders({ telegram, platformBotToken: config.telegramBotToken, allowPrivate: config.webhookAllowPrivate });
+let webpush = null;
+try {
+  webpush = await createWebPush({ db, subject: config.webpushSubject, allowPrivate: config.webhookAllowPrivate });
+} catch (e) {
+  console.error(`web push disabled: ${e.message}`);
+}
+const senders = makeSenders({
+  telegram, platformBotToken: config.telegramBotToken, webpush, allowPrivate: config.webhookAllowPrivate,
+});
 const dispatcher = new Dispatcher({ db, senders });
 
 // LISTEN на отдельном соединении; при обрыве — переподключение
@@ -99,7 +108,7 @@ const api = new Router()
   .use(publicRoutes({ db, mqtt, config, emqx }))
   .use(scenarioRoutes({ db, config }))
   .use(bridgeRoutes({ db, config, emqx }))
-  .use(channelRoutes({ db, config, senders, telegramBot }))
+  .use(channelRoutes({ db, config, senders, telegramBot, webpush }))
   .use(otaRoutes({ db, mqtt, config }));
 
 const publicServer = createServer(api);
