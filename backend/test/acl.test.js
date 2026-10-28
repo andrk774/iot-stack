@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkAcl } from '../src/acl.js';
+import { checkAcl, aclDecision } from '../src/acl.js';
 
 const id = 'd0123456789abcdef';
 const other = 'dfedcba9876543210';
@@ -38,4 +38,12 @@ test('non-device usernames and bad input are denied', () => {
   assert.equal(can('publish', 'dev/+/x', '+'), false);
   assert.equal(checkAcl({}), false);
   assert.equal(can('retain', `dev/${id}/temperature`), false);
+});
+
+test('device may publish its OTA status, not another device\'s', () => {
+  const D = 'd0123456789abcdef';
+  assert.equal(aclDecision({ username: D, topic: `dev/${D}/$ota`, action: 'publish' }), 'allow');
+  assert.equal(aclDecision({ username: D, topic: `dev/${D}/$ota/set`, action: 'subscribe' }), 'deny');
+  assert.equal(aclDecision({ username: D, topic: `dev/${D}/$ota/set`, action: 'publish' }), 'deny');
+  assert.equal(aclDecision({ username: D, topic: 'dev/dffffffffffffffff/$ota', action: 'publish' }), 'deny');
 });

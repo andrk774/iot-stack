@@ -9,4 +9,9 @@ class HTTPClient {
   void setTimeout(uint16_t) {}
   int POST(const String& payload) { (void)payload; return -1; }
   String getString() { return String(); }
+  int GET() { return -1; }
+  int getSize() { return -1; }
+  WiFiClient* getStreamPtr() { return &_stream; }
+ private:
+  WiFiClient _stream;
 };

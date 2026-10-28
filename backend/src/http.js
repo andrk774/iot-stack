@@ -18,21 +18,31 @@ export class Reply {
 }
 export const reply = (status, body) => new Reply(status, body);
 
+/** Двоичный ответ (файл прошивки и т. п.) */
+export class RawBody {
+  constructor(data, type = 'application/octet-stream', headers = {}) {
+    this.data = data;
+    this.type = type;
+    this.headers = headers;
+  }
+}
+
 export class Router {
   constructor() {
     this.routes = [];
   }
-  add(method, path, handler) {
+  /** opts.raw = лимит байт: тело приходит Buffer'ом без разбора JSON */
+  add(method, path, handler, opts = {}) {
     const keys = [];
     const pattern = path.replace(/:(\w+)/g, (_, k) => {
       keys.push(k);
       return '([^/]+)';
     });
-    this.routes.push({ method, re: new RegExp(`^${pattern}$`), keys, handler });
+    this.routes.push({ method, re: new RegExp(`^${pattern}$`), keys, handler, raw: opts.raw || 0 });
     return this;
   }
   get(p, h) { return this.add('GET', p, h); }
-  post(p, h) { return this.add('POST', p, h); }
+  post(p, h, opts) { return this.add('POST', p, h, opts); }
   put(p, h) { return this.add('PUT', p, h); }
   delete(p, h) { return this.add('DELETE', p, h); }
   use(other) {
@@ -51,7 +61,7 @@ export class Router {
       } catch {
         throw new HttpError(400, 'bad_path');
       }
-      return { handler: r.handler, params };
+      return { handler: r.handler, params, raw: r.raw };
     }
     return null;
   }
@@ -86,7 +96,36 @@ function readJson(req, limit) {
   });
 }
 
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers['content-length'] || 0);
+    if (declared > limit) {
+      reject(new HttpError(413, 'payload_too_large'));
+      req.resume();
+      return;
+    }
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new HttpError(413, 'payload_too_large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 function send(res, status, body) {
+  if (body instanceof RawBody) {
+    res.writeHead(status, { 'content-type': body.type, 'content-length': body.data.length, 'cache-control': 'no-store', ...body.headers });
+    res.end(body.data);
+    return;
+  }
   if (status === 204 || body === undefined) {
     res.writeHead(status);
     res.end();
@@ -107,7 +146,9 @@ export function createServer(router, { bodyLimit = 16 * 1024, log = console } = 
       const url = new URL(req.url, 'http://localhost');
       const m = router.match(req.method, url.pathname);
       if (!m) throw new HttpError(404, 'not_found');
-      const body = ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readJson(req, bodyLimit) : undefined;
+      let body;
+      if (m.raw) body = await readRaw(req, m.raw);
+      else if (['POST', 'PUT', 'PATCH'].includes(req.method)) body = await readJson(req, bodyLimit);
       const result = await m.handler({
         req,
         params: m.params,
@@ -116,6 +157,7 @@ export function createServer(router, { bodyLimit = 16 * 1024, log = console } = 
       });
       if (result instanceof Reply) send(res, result.status, result.body);
       else send(res, 200, result);
+      return;
     } catch (err) {
       if (err instanceof HttpError) {
         send(res, err.status, { error: err.code, ...(err.details ? { details: err.details } : {}) });

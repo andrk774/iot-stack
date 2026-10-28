@@ -69,6 +69,7 @@ services:
       EMQX_API_SECRET: ${EMQX_API_SECRET:?set in .env (запустите ./setup.sh)}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_API_URL: ${TELEGRAM_API_URL:-https://api.telegram.org}
+      FIRMWARE_MAX_MB: ${FIRMWARE_MAX_MB:-4}
       TZ: ${TZ:-UTC}
     depends_on:
       postgres:

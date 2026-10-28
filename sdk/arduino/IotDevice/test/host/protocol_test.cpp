@@ -169,7 +169,46 @@ static void testKv() {
   CHECK_EQ(m["k"], "v");
 }
 
+static void testOta() {
+  const std::string job = "0b8f7c1e-3a2d-4c5b-9e8f-1a2b3c4d5e6f";
+  const std::string good = "{\"job\":\"" + job + "\",\"path\":\"/api/ota/AbCd_-123\",\"size\":123456,"
+                           "\"md5\":\"0123456789abcdef0123456789abcdef\",\"version\":\"1.2.0\"}";
+  OtaRequest r;
+  CHECK(parseOtaRequest(good, r));
+  CHECK(r.job == job && r.path == "/api/ota/AbCd_-123" && r.size == 123456 && r.version == "1.2.0");
+  CHECK(!parseOtaRequest("", r));
+  auto with = [&](const std::string& from, const std::string& to) {
+    std::string s = good;
+    s.replace(s.find(from), from.size(), to);
+    OtaRequest x;
+    return parseOtaRequest(s, x);
+  };
+  CHECK(!with("/api/ota/AbCd_-123", "https://evil.example/fw.bin"));  // только путь своего сервера
+  CHECK(!with("/api/ota/AbCd_-123", "/api/ota/../x"));
+  CHECK(!with("/api/ota/AbCd_-123", "/api/other"));
+  CHECK(!with("0123456789abcdef0123456789abcdef", "0123"));
+  CHECK(!with("0123456789abcdef0123456789abcdef", "0123456789ABCDEF0123456789abcdef"));
+  CHECK(!with("123456", "-5"));
+  CHECK(!with("123456", "99999999999"));
+  CHECK(!with("123456", "1.5"));
+  CHECK(!with("123456", "\"123\""));
+  CHECK(!with(job, "not-a-uuid"));
+  CHECK(!with("\"1.2.0\"", "\"\""));
+  long long n = 0;
+  CHECK(jsonGetInt("{\"a\": -42}", "a", n) && n == -42);
+  CHECK(!jsonGetInt("{\"a\": \"1\"}", "a", n));
+  CHECK(!jsonGetInt("{\"a\": -}", "a", n));
+  CHECK(isOtaSetTopic("dev/" + ID + "/$ota/set", ID));
+  CHECK(!isOtaSetTopic("dev/" + ID + "/$ota", ID));
+  CHECK(!isOtaSetTopic("dev//$ota/set", ""));
+  std::string prop;
+  CHECK(!parseSetTopic("dev/" + ID + "/$ota/set", ID, prop));  // не свойство
+  CHECK(buildOtaStatus(job, "downloading", 40) == "{\"job\":\"" + job + "\",\"status\":\"downloading\",\"progress\":40}");
+  CHECK(buildOtaStatus(job, "failed", -1, "MD5 \"x\"") == "{\"job\":\"" + job + "\",\"status\":\"failed\",\"error\":\"MD5 \\\"x\\\"\"}");
+}
+
 int main() {
+  testOta();
   testKv();
   testNames();
   testTopics();

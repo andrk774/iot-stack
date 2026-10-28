@@ -3,6 +3,7 @@
 //   dev/<id>/$meta         — JSON-описание свойств, retained
 //   dev/<id>/<prop>        — значение свойства (публикует устройство или его мост)
 //   dev/<id>/<prop>/set    — команда устройству (публикуют бэкенд и scenario-runner)
+//   dev/<id>/$ota/set      — команда обновления прошивки (бэкенд, retained); dev/<id>/$ota — статус от устройства
 //   bridge/<bid>/$state    — состояние моста (LWT), retained
 //
 // Кто подключается к брокеру:
@@ -37,7 +38,7 @@ function deviceSideAllowed(parts, action) {
   if (action === 'publish') {
     if (parts.length !== 1) return false;
     const [leaf] = parts;
-    return leaf === '$state' || leaf === '$meta' || PROP_RE.test(leaf);
+    return leaf === '$state' || leaf === '$meta' || leaf === '$ota' || PROP_RE.test(leaf);
   }
   if (action === 'subscribe') {
     if (parts.length !== 2 || parts[1] !== 'set') return false;

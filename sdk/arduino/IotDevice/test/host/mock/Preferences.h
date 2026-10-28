@@ -5,6 +5,7 @@ class Preferences {
   bool begin(const char* name, bool readOnly = false, const char* partition_label = NULL) { (void)name; (void)readOnly; (void)partition_label; return true; }
   void end() {}
   bool clear() { return true; }
+  bool remove(const char* key) { (void)key; return true; }
   bool isKey(const char* key) { (void)key; return false; }
   size_t putString(const char* key, const char* value) { (void)key; return strlen(value); }
   size_t putString(const char* key, String value) { (void)key; return value.length(); }

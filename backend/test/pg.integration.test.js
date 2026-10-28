@@ -8,6 +8,7 @@ import { Pool } from '../../devtools/pgwire.js';
 import { migrate, listMigrations } from '../src/migrate.js';
 import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from '../src/routes/channels.js';
 import { Dispatcher } from '../src/notify/dispatcher.js';
+import { otaRoutes, handleOtaStatus } from '../src/routes/ota.js';
 import { createServer, Router } from '../src/http.js';
 import { publicRoutes } from '../src/routes/public.js';
 import { scenarioRoutes } from '../src/routes/scenarios.js';
@@ -24,12 +25,14 @@ let admin; let db; let api; let hooks; let apiUrl; let hooksUrl;
 const published = [];
 const kicked = [];
 const emqx = { kick: async (id) => { kicked.push(id); return true; } };
+const mqttFake = { connected: true, publish: async (t, v, o) => { published.push([t, v, o]); } };
 const testSent = [];
 const testSenders = {
   webhook: async (ch, n) => { testSent.push([ch.id, n.message]); },
   telegram: async (ch, n) => { testSent.push([ch.id, n.message]); },
 };
 const config = {
+  firmwareMaxBytes: 64 * 1024,
   telegramBotToken: '1:x', webhookAllowPrivate: false,
   jwtSecret: 'j'.repeat(40), jwtTtlSec: 3600, allowRegistration: true, maxDevicesPerUser: 5, maxBridgeDevices: 3,
   claimTtlMin: 30, publicHost: 'iot.test', mqttPublicPort: 8883, serviceUsers: { backend: 'b', ingest: 'i', scenarios: 's' },
@@ -57,10 +60,11 @@ before(async () => {
   await db.query(await schemaWithoutTimescale());
   await migrate(db, { log: {} });
   await migrate(db, { log: {} }); // повторно — ничего не делает
-  const mqtt = { connected: true, publish: async (t, v) => { published.push([t, v]); } };
+  const mqtt = mqttFake;
   api = createServer(new Router().use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
-    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' } })), { log: { error: (...a) => console.error(...a) } });
+    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' } }))
+    .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
   hooks = createServer(internalRoutes({ db, config, log: {} }));
   await new Promise((r) => api.listen(0, r));
   await new Promise((r) => hooks.listen(0, r));
@@ -132,7 +136,7 @@ test('end-to-end on real SQL', { skip }, async () => {
   // команды учитывают $meta
   assert.equal((await call(apiUrl, 'POST', `/api/devices/${D}/commands`, { property: 'temperature', value: 1 }, auth)).status, 400);
   assert.equal((await call(apiUrl, 'POST', `/api/devices/${D}/commands`, { property: 'relay', value: true }, auth)).status, 202);
-  assert.deepEqual(published.at(-1), [`dev/${D}/relay/set`, 'true']);
+  assert.deepEqual(published.at(-1).slice(0, 2), [`dev/${D}/relay/set`, 'true']);
 
   // веб-панель по MQTT: ACL по владельцу
   const userAcl = await call(hooksUrl, 'POST', '/internal/mqtt/acl', { username: `u:${uid}`, topic: `dev/${D}/#`, action: 'subscribe' });
@@ -309,4 +313,64 @@ test('notification channels and dispatch on real SQL', { skip }, async () => {
 
   assert.equal(await unlinkTelegramChat(db, '555'), 1);
   assert.equal((await call(apiUrl, 'DELETE', `/api/channels/${whId}`, null, auth)).status, 204);
+});
+
+test('OTA: firmware library, job, download by token, status from device', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'ota@x.ru', password: 'password123' });
+  const auth = `Bearer ${reg.body.token}`;
+  const other = await call(apiUrl, 'POST', '/api/auth/register', { email: 'ota2@x.ru', password: 'password123' });
+  const dev = await call(apiUrl, 'POST', '/api/devices', { name: 'Реле' }, auth);
+  const D = dev.body.device.id;
+  await call(apiUrl, 'POST', '/api/provision', { claim_token: dev.body.claim_token });
+
+  const upload = (buf, q, a = auth) => fetch(`${apiUrl}/api/firmwares?${q}`, { method: 'POST', headers: { authorization: a, 'content-type': 'application/octet-stream' }, body: buf });
+  const image = Buffer.alloc(5000, 7);
+  image[0] = 0xe9;
+  assert.equal((await upload(Buffer.alloc(5000, 1), 'name=x&version=1.0')).status, 400); // не образ ESP
+  assert.equal((await upload(image, 'name=x&version=bad version')).status, 400);
+  assert.equal((await upload(Buffer.alloc(config.firmwareMaxBytes + 1, 0xe9), 'name=x&version=1.0')).status, 413);
+  const up = await upload(image, 'name=Реле&version=1.1.0');
+  assert.equal(up.status, 201);
+  const fw = await up.json();
+  assert.equal(fw.size, 5000);
+  assert.equal(fw.md5, (await import('node:crypto')).createHash('md5').update(image).digest('hex'));
+  const list = await call(apiUrl, 'GET', '/api/firmwares', null, auth);
+  assert.equal(list.body.firmwares.length, 1);
+  assert.ok(!('data' in list.body.firmwares[0]));
+
+  // чужая прошивка и чужое устройство
+  assert.equal((await call(apiUrl, 'POST', `/api/devices/${D}/ota`, { firmware_id: fw.id }, `Bearer ${other.body.token}`)).status, 404);
+
+  const start = await call(apiUrl, 'POST', `/api/devices/${D}/ota`, { firmware_id: fw.id }, auth);
+  assert.equal(start.status, 202);
+  const [topic, payload, opts] = published.at(-1);
+  assert.equal(topic, `dev/${D}/$ota/set`);
+  assert.equal(opts.retain, true);
+  const cmd = JSON.parse(payload);
+  assert.deepEqual(Object.keys(cmd).sort(), ['job', 'md5', 'path', 'size', 'version']);
+  assert.equal(cmd.version, '1.1.0');
+
+  const dl = await fetch(apiUrl + cmd.path);
+  assert.equal(dl.status, 200);
+  assert.ok(Buffer.from(await dl.arrayBuffer()).equals(image));
+  assert.equal((await fetch(`${apiUrl}/api/ota/${'x'.repeat(32)}`)).status, 404);
+
+  const status = (o) => handleOtaStatus({ db, mqtt: mqttFake, log: {} }, D, Buffer.from(JSON.stringify(o)));
+  assert.equal(await status({ job: cmd.job, status: 'bogus' }), null);
+  assert.equal((await status({ job: cmd.job, status: 'downloading', progress: 40 })).progress, 40);
+  const done = await status({ job: cmd.job, status: 'done' });
+  assert.equal(done.status, 'done');
+  assert.deepEqual(published.at(-1).slice(0, 2), [`dev/${D}/$ota/set`, '']); // команда снята
+  assert.equal(await status({ job: cmd.job, status: 'downloading' }), null); // итог не откатывается
+  assert.equal((await fetch(apiUrl + cmd.path)).status, 404); // после итога ссылка не работает
+
+  // новое задание отменяет незавершённое; отмена снимает команду
+  const j2 = await call(apiUrl, 'POST', `/api/devices/${D}/ota`, { firmware_id: fw.id }, auth);
+  const j3 = await call(apiUrl, 'POST', `/api/devices/${D}/ota`, { firmware_id: fw.id }, auth);
+  const { rows } = await db.query('SELECT id, status FROM ota_jobs WHERE id = ANY($1::uuid[])', [[j2.body.job.id, j3.body.job.id]]);
+  assert.deepEqual(Object.fromEntries(rows.map((r) => [r.id, r.status])), { [j2.body.job.id]: 'cancelled', [j3.body.job.id]: 'pending' });
+  assert.equal((await call(apiUrl, 'DELETE', `/api/devices/${D}/ota`, null, auth)).body.cancelled, 1);
+  const cur = await call(apiUrl, 'GET', `/api/devices/${D}/ota`, null, auth);
+  assert.equal(cur.body.job.status, 'cancelled');
+  assert.equal((await call(apiUrl, 'DELETE', `/api/firmwares/${fw.id}`, null, auth)).status, 204);
 });

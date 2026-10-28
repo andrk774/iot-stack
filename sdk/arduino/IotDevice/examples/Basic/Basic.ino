@@ -35,6 +35,8 @@ void setup() {
   device.setCaCert(CA_CERT);
   // портал откроется, если Wi-Fi не подключится за минуту; без пароля точка доступа открытая
   device.setPortal("change-me-1234");  // замените: от 8 символов, латиница и цифры
+  device.enableOta();                   // обновление прошивки из панели
+  device.onOtaReboot([]() { digitalWrite(RELAY_PIN, LOW); });  // перед перезагрузкой выключить нагрузку
   if (!device.begin()) Serial.println("Ошибки конфигурации — см. сообщения [iot] ОШИБКА выше");
 
   relay.setBool(false);  // начальное состояние уйдёт на сервер при подключении

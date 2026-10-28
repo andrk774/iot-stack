@@ -86,6 +86,7 @@ client.on('error', (e) => console.error('mqtt error', e.message));
 client.on('message', (topic, payload) => {
   const parts = topic.split('/');
   if (parts.length !== 3 || !DEVICE_RE.test(parts[1])) return;
+  if (parts[2].startsWith('$') && parts[2] !== '$state' && parts[2] !== '$meta') return; // $ota и прочее служебное
   if (payload.includes(0)) return; // NUL не запишется в уведомление (PostgreSQL text)
   const text = payload.toString('utf8').trim();
   if (parts[2] === '$meta') {

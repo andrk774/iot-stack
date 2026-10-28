@@ -18,6 +18,7 @@ class IotStorage {
   size_t putString(const char* key, const String& value);
   uint16_t getUShort(const char* key, uint16_t defaultValue = 0);
   size_t putUShort(const char* key, uint16_t value);
+  bool remove(const char* key);
   bool clear();
 
  private:

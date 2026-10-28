@@ -12,6 +12,7 @@ import { internalRoutes } from './routes/internal.js';
 import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from './routes/channels.js';
 import { TelegramApi, TelegramBot } from './notify/telegram.js';
 import { Dispatcher, makeSenders } from './notify/dispatcher.js';
+import { otaRoutes, handleOtaStatus } from './routes/ota.js';
 
 const config = loadConfig();
 
@@ -39,7 +40,17 @@ const mqttClient = mqttLib.connect(config.mqttUrl, {
   reconnectPeriod: 3000,
   connectTimeout: 10_000,
 });
-mqttClient.on('connect', () => console.log('mqtt connected'));
+mqttClient.on('connect', async () => {
+  console.log('mqtt connected');
+  // статусы OTA от устройств; $share — при нескольких репликах сообщение получит одна
+  await mqttClient.subscribeAsync('$share/backend/dev/+/$ota', { qos: 1 }).catch((e) => console.error('subscribe failed', e.message));
+});
+mqttClient.on('message', (topic, payload) => {
+  const parts = topic.split('/');
+  if (parts.length === 3 && parts[0] === 'dev' && parts[2] === '$ota') {
+    handleOtaStatus({ db, mqtt }, parts[1], payload).catch((e) => console.error('ota status', e.message));
+  }
+});
 mqttClient.on('error', (e) => console.error('mqtt error', e.message));
 
 const mqtt = {
@@ -86,7 +97,8 @@ const api = new Router()
   .use(publicRoutes({ db, mqtt, config, emqx }))
   .use(scenarioRoutes({ db, config }))
   .use(bridgeRoutes({ db, config, emqx }))
-  .use(channelRoutes({ db, config, senders, telegramBot }));
+  .use(channelRoutes({ db, config, senders, telegramBot }))
+  .use(otaRoutes({ db, mqtt, config }));
 
 const publicServer = createServer(api);
 const internalServer = createServer(internalRoutes({ db, config }), { bodyLimit: 8 * 1024 });

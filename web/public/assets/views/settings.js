@@ -2,6 +2,7 @@
 import { h, mount, toast, modal, field, copyText, actionButton } from '../dom.js';
 import { get, post, put, del } from '../api.js';
 import { relativeTime, errorMessage } from '../format.js';
+import { firmwaresSection } from './ota.js';
 
 export const LEVEL_OPTIONS = { info: 'Все уведомления', warning: 'Внимание и тревога', alert: 'Только тревога' };
 const TYPE_LABELS = { telegram: 'Telegram', webhook: 'Вебхук', webpush: 'Браузер' };
@@ -137,7 +138,7 @@ function notificationsSection() {
   return section;
 }
 
-export const settingsSections = [notificationsSection];
+export const settingsSections = [notificationsSection, firmwaresSection];
 
 export function renderSettings(root) {
   mount(root, h('header', { class: 'page-head' }, h('h1', null, 'Настройки')), ...settingsSections.map((s) => s()));

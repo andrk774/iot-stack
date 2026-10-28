@@ -2,12 +2,14 @@
 #include "WiFi.h"
 #include "WiFiClientSecure.h"
 #include "Sim.h"
+#include "Update.h"
 
 Sim sim;
 SimWeb web;
 HardwareSerial Serial;
 WiFiClass WiFi;
 EspClass ESP;
+UpdateClass Update;
 String IPAddress::toString() const { return String("192.168.4.1"); }
 unsigned long millis() { return sim.millis; }
 void delay(uint32_t ms) { sim.millis += ms; }

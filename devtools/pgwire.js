@@ -8,6 +8,7 @@ const PARSERS = {
   21: Number, 23: Number, 26: Number, 700: Number, 701: Number,
   20: String, 1700: String,                       // как node-pg: int8 и numeric строкой
   114: JSON.parse, 3802: JSON.parse,
+  17: (s) => Buffer.from(s.slice(2), 'hex'),          // bytea (формат hex) -> Buffer, как node-pg
   1114: (s) => new Date(`${s}Z`), 1184: (s) => new Date(s.replace(' ', 'T').replace(/([+-]\d\d)$/, '$1:00')),
 };
 

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace iot {
 
@@ -278,6 +279,61 @@ bool jsonGetString(const std::string& json, const std::string& key, std::string&
     return false;
   }
   return false;
+}
+
+bool jsonGetInt(const std::string& json, const std::string& key, long long& out) {
+  const std::string needle = "\"" + key + "\"";
+  size_t pos = 0;
+  while ((pos = json.find(needle, pos)) != std::string::npos) {
+    size_t i = pos + needle.size();
+    skipWs(json, i);
+    if (i >= json.size() || json[i] != ':') { pos = i; continue; }
+    i++;
+    skipWs(json, i);
+    size_t b = i;
+    if (i < json.size() && json[i] == '-') i++;
+    while (i < json.size() && json[i] >= '0' && json[i] <= '9') i++;
+    if (i == b || (i == b + 1 && json[b] == '-') || i - b > 18) return false;
+    if (i < json.size() && (json[i] == '.' || json[i] == 'e' || json[i] == 'E')) return false;  // только целые
+    out = std::strtoll(json.substr(b, i - b).c_str(), nullptr, 10);
+    return true;
+  }
+  return false;
+}
+
+bool isOtaSetTopic(const std::string& t, const std::string& deviceId) {
+  return !deviceId.empty() && t == "dev/" + deviceId + "/$ota/set";
+}
+
+static bool allOf(const std::string& s, const char* allowed) {
+  for (char c : s) if (!std::strchr(allowed, c) || c == 0) return false;
+  return true;
+}
+
+bool parseOtaRequest(const std::string& json, OtaRequest& out) {
+  OtaRequest r;
+  if (!jsonGetString(json, "job", r.job) || !jsonGetString(json, "path", r.path) || !jsonGetString(json, "md5", r.md5) ||
+      !jsonGetString(json, "version", r.version) || !jsonGetInt(json, "size", r.size)) {
+    return false;
+  }
+  if (r.job.size() != 36 || !allOf(r.job, "0123456789abcdef-")) return false;
+  // только путь на своём сервере: хост и схему устройство подставляет само
+  if (r.path.compare(0, 9, "/api/ota/") != 0 || r.path.size() > 100 ||
+      !allOf(r.path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/")) {
+    return false;
+  }
+  if (r.md5.size() != 32 || !allOf(r.md5, "0123456789abcdef")) return false;
+  if (r.version.empty() || r.version.size() > 32) return false;
+  if (r.size <= 0 || r.size > 16LL * 1024 * 1024) return false;
+  out = r;
+  return true;
+}
+
+std::string buildOtaStatus(const std::string& job, const char* status, int progress, const std::string& error) {
+  std::string j = "{\"job\":\"" + jsonEscape(job) + "\",\"status\":\"" + jsonEscape(status) + "\"";
+  if (progress >= 0) j += ",\"progress\":" + std::to_string(progress);
+  if (!error.empty()) j += ",\"error\":\"" + jsonEscape(error.substr(0, 200)) + "\"";
+  return j + "}";
 }
 
 std::string kvEncode(const std::map<std::string, std::string>& kv) {

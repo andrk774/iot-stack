@@ -28,6 +28,17 @@ struct Sim {
   std::string httpBody;
   int httpPosts = 0;
   std::string httpLastBody;
+  // HTTP GET (скачивание прошивки) и Update
+  int otaCode = 200;
+  std::string otaBody;
+  long otaSizeOverride = -1;  // Content-Length, если отличается от тела
+  int httpGets = 0;
+  std::string httpLastUrl;
+  bool updateBeginOk = true, updateEndOk = true, updateEnded = false;
+  size_t updateBeginSize = 0;
+  std::string updateMd5, updateWritten;
+  int updateProgressCalls = 0;
+  std::function<void()> onUpdateChunk;  // вызывается между кусками записи (проверить поведение во время скачивания)
   // брокер
   bool brokerUp = true;
   int connack = 0;  // 0 — принять, 5 — not authorized
