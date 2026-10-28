@@ -1,5 +1,5 @@
 import { h, mount, toast } from './dom.js';
-import { get, getToken, setToken, onAuthChange } from './api.js';
+import { get, post, getToken, setToken, onAuthChange } from './api.js';
 import { store } from './store.js';
 import { errorMessage } from './format.js';
 import { renderLogin } from './views/login.js';
@@ -34,6 +34,11 @@ const NAV = [
 
 const LIVE_LABELS = { online: 'на связи', connecting: 'подключение…', offline: 'нет связи', error: 'ошибка доступа' };
 
+async function logout() {
+  try { await post('/api/auth/logout'); } catch { /* сессия могла уже истечь */ }
+  setToken(null);
+}
+
 function buildShell() {
   const nav = h('nav', { class: 'nav', 'aria-label': 'Разделы' },
     ...NAV.map(([key, href, label]) => h('a', { href, dataset: { key } }, label,
@@ -46,7 +51,7 @@ function buildShell() {
     h('div', { class: 'topbar-end' },
       live,
       h('span', { class: 'who' }, store.me?.email || ''),
-      h('button', { class: 'btn btn-small', type: 'button', onclick: () => setToken(null) }, 'Выйти')));
+      h('button', { class: 'btn btn-small', type: 'button', onclick: logout }, 'Выйти')));
   mount(app, h('a', { class: 'skip', href: '#main' }, 'К содержимому'), header, main);
 
   const setLive = (s) => {

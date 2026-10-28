@@ -1,19 +1,12 @@
 import { Router, HttpError, reply, str } from '../http.js';
 import { DEVICE_ID_RE, PROP_RE } from '../acl.js';
-import {
-  hashSecret, verifySecret, signJwt, randomToken, sha256, newDeviceId,
-} from '../security.js';
+import { hashSecret, randomToken, sha256, newDeviceId } from '../security.js';
 import { makeAuth, withTx, lockScope } from './common.js';
 import { isSettable } from '../../../shared/scenario.js';
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BUCKET_RE = /^(\d{1,4})(s|m|h|d)$/;
 const BUCKET_UNITS = { s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
 const MAX_RANGE_MS = 92 * 24 * 3600 * 1000;
-
-// для выравнивания времени ответа, когда пользователь не найден
-let dummyHash;
-const getDummyHash = () => (dummyHash ??= hashSecret('timing-equalizer'));
 
 export const DEVICE_COLUMNS = `id, name, state, meta, last_values, last_seen, created_at, provisioned_at, bridge_id,
   (mqtt_password_hash IS NOT NULL OR bridge_id IS NOT NULL) AS provisioned`;
@@ -26,7 +19,7 @@ const NO_EMQX = { kick: async () => false };
  */
 export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   const r = new Router();
-  const auth = makeAuth(config);
+  const auth = makeAuth(config, db);
 
   const loadOwnDevice = async (userId, id) => {
     if (!DEVICE_ID_RE.test(id)) throw new HttpError(404, 'device_not_found');
@@ -37,50 +30,11 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
     return rows[0];
   };
 
-  const issueToken = (user) => ({
-    token: signJwt({ sub: user.id }, config.jwtSecret, config.jwtTtlSec),
-    user: { id: user.id, email: user.email },
-  });
-
   r.get('/api/health', async () => ({ ok: true, mqtt: Boolean(mqtt.connected) }));
-
-  // ---------- аккаунт ----------
-  r.post('/api/auth/register', async ({ body }) => {
-    if (!config.allowRegistration) throw new HttpError(403, 'registration_disabled');
-    const email = str(body.email, 'email', { max: 254, re: EMAIL_RE }).toLowerCase();
-    const password = str(body.password, 'password', { min: 8, max: 128 });
-    try {
-      const { rows } = await db.query(
-        'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
-        [email, await hashSecret(password)],
-      );
-      return reply(201, issueToken(rows[0]));
-    } catch (e) {
-      if (e.code === '23505') throw new HttpError(409, 'email_taken');
-      throw e;
-    }
-  });
-
-  r.post('/api/auth/login', async ({ body }) => {
-    const email = str(body.email, 'email', { max: 254 }).toLowerCase();
-    const password = str(body.password, 'password', { min: 1, max: 128 });
-    const { rows } = await db.query('SELECT id, email, password_hash FROM users WHERE email = $1', [email]);
-    const user = rows[0];
-    const ok = await verifySecret(password, user ? user.password_hash : await getDummyHash());
-    if (!user || !ok) throw new HttpError(401, 'invalid_credentials');
-    return issueToken(user);
-  });
-
-  r.get('/api/me', async ({ req }) => {
-    const userId = auth(req);
-    const { rows } = await db.query('SELECT id, email, created_at FROM users WHERE id = $1', [userId]);
-    if (!rows[0]) throw new HttpError(401, 'unauthorized');
-    return rows[0];
-  });
 
   // ---------- устройства ----------
   r.get('/api/devices', async ({ req }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const { rows } = await db.query(
       `SELECT ${DEVICE_COLUMNS} FROM devices WHERE owner_id = $1 ORDER BY created_at`, [userId],
     );
@@ -93,7 +47,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   };
 
   r.post('/api/devices', async ({ req, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const name = str(body.name, 'name', { max: 64 });
     const claim = newClaim();
     const device = await withTx(db, async (tx) => {
@@ -112,10 +66,10 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
     return reply(201, { device, claim_token: claim.token, claim_expires_at: claim.expiresAt });
   });
 
-  r.get('/api/devices/:id', async ({ req, params }) => loadOwnDevice(auth(req), params.id));
+  r.get('/api/devices/:id', async ({ req, params }) => loadOwnDevice(await auth(req), params.id));
 
   r.put('/api/devices/:id', async ({ req, params, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     await loadOwnDevice(userId, params.id);
     const name = str(body.name, 'name', { max: 64 });
     const { rows } = await db.query(
@@ -127,7 +81,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   // Новый токен привязки (перепрошивка/смена владельца). Старый MQTT-пароль перестаёт работать,
   // а уже открытая сессия устройства разрывается через REST API EMQX.
   r.post('/api/devices/:id/claim', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const device = await loadOwnDevice(userId, params.id);
     if (device.bridge_id) throw new HttpError(409, 'device_managed_by_bridge');
     const claim = newClaim();
@@ -142,7 +96,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   });
 
   r.delete('/api/devices/:id', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const device = await loadOwnDevice(userId, params.id);
     await withTx(db, async (tx) => {
       await tx.query('DELETE FROM devices WHERE id = $1', [device.id]);
@@ -154,7 +108,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   });
 
   r.post('/api/devices/:id/commands', async ({ req, params, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const device = await loadOwnDevice(userId, params.id);
     const property = str(body.property, 'property', { max: 32, re: PROP_RE });
     const { value } = body;
@@ -170,7 +124,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   });
 
   r.get('/api/devices/:id/telemetry', async ({ req, params, query }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const device = await loadOwnDevice(userId, params.id);
     const property = str(query.property, 'property', { max: 32, re: PROP_RE });
 

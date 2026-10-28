@@ -30,5 +30,28 @@ export function createEmqxAdmin({ url, key, secret, fetchImpl = globalThis.fetch
     }
   }
 
-  return { enabled, kick };
+  /** Разорвать все сессии клиентов с этим логином (веб-панель пользователя). Возвращает число разорванных. */
+  async function kickUser(username) {
+    if (!enabled) return 0;
+    try {
+      const q = new URLSearchParams({ username, limit: '100' });
+      const res = await fetchImpl(`${url.replace(/\/$/, '')}/api/v5/clients?${q}`, {
+        headers: { authorization: auth },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        log.error?.(`emqx list clients ${username}: HTTP ${res.status}`);
+        return 0;
+      }
+      const { data = [] } = await res.json();
+      let n = 0;
+      for (const c of data) if (c.username === username && (await kick(c.clientid))) n++;
+      return n;
+    } catch (e) {
+      log.error?.(`emqx kickUser ${username}: ${e.message}`);
+      return 0;
+    }
+  }
+
+  return { enabled, kick, kickUser };
 }

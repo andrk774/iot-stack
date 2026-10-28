@@ -31,7 +31,7 @@ export function checkFirmwareImage(buf) {
 
 export function otaRoutes({ db, mqtt, config }) {
   const r = new Router();
-  const auth = makeAuth(config);
+  const auth = makeAuth(config, db);
   const maxBytes = config.firmwareMaxBytes || 4 * 1024 * 1024;
 
   const ownDevice = async (userId, id) => {
@@ -45,7 +45,7 @@ export function otaRoutes({ db, mqtt, config }) {
 
   // ---------- библиотека прошивок ----------
   r.post('/api/firmwares', async ({ req, body, query }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const name = str(query.name, 'name', { max: 64 });
     const version = str(query.version, 'version', { max: 32, re: VERSION_RE });
     const bad = checkFirmwareImage(body);
@@ -65,13 +65,13 @@ export function otaRoutes({ db, mqtt, config }) {
   }, { raw: maxBytes });
 
   r.get('/api/firmwares', async ({ req }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const { rows } = await db.query(`SELECT ${FW_COLUMNS} FROM firmwares WHERE owner_id = $1 ORDER BY created_at DESC`, [userId]);
     return { firmwares: rows, max_bytes: maxBytes };
   });
 
   r.delete('/api/firmwares/:id', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     if (!UUID_RE.test(params.id)) throw new HttpError(404, 'firmware_not_found');
     const { rowCount } = await db.query('DELETE FROM firmwares WHERE id = $1 AND owner_id = $2', [params.id, userId]);
     if (!rowCount) throw new HttpError(404, 'firmware_not_found');
@@ -80,14 +80,14 @@ export function otaRoutes({ db, mqtt, config }) {
 
   // ---------- задания ----------
   r.get('/api/devices/:id/ota', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const d = await ownDevice(userId, params.id);
     const { rows } = await db.query(`SELECT ${JOB_COLUMNS} FROM ota_jobs WHERE device_id = $1 ORDER BY created_at DESC LIMIT 1`, [d.id]);
     return { job: rows[0] || null, current_version: d.meta?.fw ?? null };
   });
 
   r.post('/api/devices/:id/ota', async ({ req, params, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const d = await ownDevice(userId, params.id);
     if (d.bridge_id) throw new HttpError(409, 'device_managed_by_bridge');
     if (!d.provisioned) throw new HttpError(409, 'device_not_provisioned');
@@ -117,7 +117,7 @@ export function otaRoutes({ db, mqtt, config }) {
   });
 
   r.delete('/api/devices/:id/ota', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const d = await ownDevice(userId, params.id);
     const { rowCount } = await db.query(
       `UPDATE ota_jobs SET status = 'cancelled', updated_at = now()

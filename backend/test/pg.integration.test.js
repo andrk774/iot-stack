@@ -9,6 +9,8 @@ import { migrate, listMigrations } from '../src/migrate.js';
 import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from '../src/routes/channels.js';
 import { Dispatcher } from '../src/notify/dispatcher.js';
 import { otaRoutes, handleOtaStatus } from '../src/routes/ota.js';
+import { accountRoutes } from '../src/routes/account.js';
+import { totpCode } from '../src/security.js';
 import { createServer, Router } from '../src/http.js';
 import { publicRoutes } from '../src/routes/public.js';
 import { scenarioRoutes } from '../src/routes/scenarios.js';
@@ -24,7 +26,7 @@ const dbName = `iot_test_${Date.now()}`;
 let admin; let db; let api; let hooks; let apiUrl; let hooksUrl;
 const published = [];
 const kicked = [];
-const emqx = { kick: async (id) => { kicked.push(id); return true; } };
+const emqx = { kick: async (id) => { kicked.push(id); return true; }, kickUser: async (u) => { kicked.push(u); return 1; } };
 const mqttFake = { connected: true, publish: async (t, v, o) => { published.push([t, v, o]); } };
 const testSent = [];
 const testSenders = {
@@ -61,7 +63,7 @@ before(async () => {
   await migrate(db, { log: {} });
   await migrate(db, { log: {} }); // повторно — ничего не делает
   const mqtt = mqttFake;
-  api = createServer(new Router().use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
+  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
     .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' } }))
     .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
@@ -373,4 +375,65 @@ test('OTA: firmware library, job, download by token, status from device', { skip
   const cur = await call(apiUrl, 'GET', `/api/devices/${D}/ota`, null, auth);
   assert.equal(cur.body.job.status, 'cancelled');
   assert.equal((await call(apiUrl, 'DELETE', `/api/firmwares/${fw.id}`, null, auth)).status, 204);
+});
+
+test('sessions, password change and TOTP on real SQL', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'sec@x.ru', password: 'password123' });
+  const a1 = `Bearer ${reg.body.token}`;
+  const uid = reg.body.user.id;
+  const login = async (extra = {}) => call(apiUrl, 'POST', '/api/auth/login', { email: 'sec@x.ru', password: 'password123', ...extra });
+  const a2 = `Bearer ${(await login()).body.token}`;
+  const list = await call(apiUrl, 'GET', '/api/sessions', null, a1);
+  assert.equal(list.body.sessions.length, 2);
+  assert.equal(list.body.sessions.filter((x) => x.current).length, 1);
+
+  // завершить другие сеансы: a2 перестаёт работать сразу, в том числе для MQTT панели
+  assert.equal((await call(apiUrl, 'POST', '/api/sessions/revoke-others', {}, a1)).body.closed, 1);
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, a2)).status, 401);
+  const mq = (tok) => call(hooksUrl, 'POST', '/internal/mqtt/auth', { username: `u:${uid}`, password: tok, clientid: `web-${uid}-abcd` });
+  assert.equal((await mq(a2.slice(7))).body.result, 'deny');
+  assert.equal((await mq(a1.slice(7))).body.result, 'allow');
+  assert.ok(kicked.includes(`u:${uid}`));
+
+  // смена пароля: нужен текущий; остальные сеансы закрываются, текущий живёт
+  const a3 = `Bearer ${(await login()).body.token}`;
+  assert.equal((await call(apiUrl, 'POST', '/api/auth/password', { current_password: 'wrong', new_password: 'newpassword1' }, a1)).status, 403);
+  const ch = await call(apiUrl, 'POST', '/api/auth/password', { current_password: 'password123', new_password: 'newpassword1' }, a1);
+  assert.equal(ch.body.sessions_closed, 1);
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, a3)).status, 401);
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, a1)).status, 200);
+  assert.equal((await login()).status, 401);
+  const relog = (extra = {}) => call(apiUrl, 'POST', '/api/auth/login', { email: 'sec@x.ru', password: 'newpassword1', ...extra });
+  assert.equal((await relog()).status, 200);
+
+  // 2FA
+  const setup = await call(apiUrl, 'POST', '/api/auth/totp/setup', {}, a1);
+  assert.match(setup.body.otpauth_url, /^otpauth:\/\/totp\//);
+  const step = Math.floor(Date.now() / 30000);
+  assert.equal((await call(apiUrl, 'POST', '/api/auth/totp/enable', { code: '000000' === totpCode(setup.body.secret, step) ? '111111' : '000000' }, a1)).status, 400);
+  const en = await call(apiUrl, 'POST', '/api/auth/totp/enable', { code: totpCode(setup.body.secret, step) }, a1);
+  assert.equal(en.status, 200);
+  assert.equal(en.body.recovery_codes.length, 10);
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, a1)).body.totp_enabled, true);
+
+  assert.equal((await relog()).body.error, 'totp_required');
+  // код, использованный при включении, повторно не принимается
+  assert.equal((await relog({ code: totpCode(setup.body.secret, step) })).body.error, 'invalid_totp');
+  const next = totpCode(setup.body.secret, step + 1);
+  assert.equal((await relog({ code: next })).status, 200);
+  assert.equal((await relog({ code: next })).body.error, 'invalid_totp');
+  // код восстановления — одноразовый, регистр и дефисы не важны
+  const rc = en.body.recovery_codes[0];
+  assert.equal((await relog({ code: rc.toUpperCase().replace(/-/g, '') })).status, 200);
+  assert.equal((await relog({ code: rc })).body.error, 'invalid_totp');
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, a1)).body.recovery_codes_left, 9);
+
+  // выключение: пароль + код
+  assert.equal((await call(apiUrl, 'POST', '/api/auth/totp/disable', { password: 'newpassword1', code: '123' }, a1)).status, 400);
+  assert.equal((await call(apiUrl, 'POST', '/api/auth/totp/disable', { password: 'newpassword1', code: en.body.recovery_codes[1] }, a1)).status, 200);
+  assert.equal((await relog()).status, 200);
+
+  // выход
+  assert.equal((await call(apiUrl, 'POST', '/api/auth/logout', {}, a1)).status, 204);
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, a1)).status, 401);
 });

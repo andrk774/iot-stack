@@ -13,6 +13,7 @@ import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from './routes/ch
 import { TelegramApi, TelegramBot } from './notify/telegram.js';
 import { Dispatcher, makeSenders } from './notify/dispatcher.js';
 import { otaRoutes, handleOtaStatus } from './routes/ota.js';
+import { accountRoutes } from './routes/account.js';
 
 const config = loadConfig();
 
@@ -94,6 +95,7 @@ const sweepTimer = setInterval(() => dispatcher.kick(), 30_000);
 telegramBot?.start();
 
 const api = new Router()
+  .use(accountRoutes({ db, config, emqx }))
   .use(publicRoutes({ db, mqtt, config, emqx }))
   .use(scenarioRoutes({ db, config }))
   .use(bridgeRoutes({ db, config, emqx }))

@@ -34,7 +34,7 @@ const level = (v) => {
  */
 export function channelRoutes({ db, config, senders, telegramBot = null, webpush = null }) {
   const r = new Router();
-  const auth = makeAuth(config);
+  const auth = makeAuth(config, db);
   const allowPrivate = Boolean(config.webhookAllowPrivate);
 
   const own = async (userId, id) => {
@@ -70,7 +70,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
   });
 
   r.get('/api/channels', async ({ req }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const { rows } = await db.query(`SELECT ${COLUMNS} FROM notification_channels WHERE owner_id = $1 ORDER BY created_at`, [userId]);
     return {
       channels: rows.map(publicChannel),
@@ -80,7 +80,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
   });
 
   r.post('/api/channels', async ({ req, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const minLevel = level(body.min_level);
     if (body.type === 'webhook') {
       const url = str(body.url, 'url', { max: 2048 });
@@ -120,7 +120,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
 
   // Ссылка t.me/<бот>?start=<код>: пользователь жмёт Start, бот привязывает чат
   r.post('/api/channels/telegram-link', async ({ req }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     if (!config.telegramBotToken) throw new HttpError(409, 'telegram_not_configured');
     if (!telegramBot?.username) throw new HttpError(503, 'telegram_unavailable');
     const code = randomToken(18); // 24 символа base64url — Telegram принимает до 64 [A-Za-z0-9_-]
@@ -131,7 +131,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
   });
 
   r.put('/api/channels/:id', async ({ req, params, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const ch = await own(userId, params.id);
     const name = body.name === undefined ? ch.name : str(body.name, 'name', { max: 64 });
     const minLevel = body.min_level === undefined ? ch.min_level : level(body.min_level);
@@ -145,7 +145,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
   });
 
   r.delete('/api/channels/:id', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const ch = await own(userId, params.id);
     await db.query('DELETE FROM notification_channels WHERE id = $1', [ch.id]);
     return reply(204);
@@ -153,7 +153,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
 
   // Проверка канала: отправить тестовое сообщение прямо сейчас
   r.post('/api/channels/:id/test', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const ch = await own(userId, params.id);
     const n = { id: 0, level: 'info', message: 'Проверка канала: уведомления платформы будут приходить сюда.',
       scenario_id: null, scenario_name: null, created_at: new Date() };
