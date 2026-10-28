@@ -10,6 +10,8 @@ import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from '../src/rout
 import { Dispatcher } from '../src/notify/dispatcher.js';
 import { otaRoutes, handleOtaStatus } from '../src/routes/ota.js';
 import { accountRoutes } from '../src/routes/account.js';
+import { createWebPush } from '../src/notify/webpush.js';
+import crypto from 'node:crypto';
 import { totpCode } from '../src/security.js';
 import { createServer, Router } from '../src/http.js';
 import { publicRoutes } from '../src/routes/public.js';
@@ -63,9 +65,10 @@ before(async () => {
   await migrate(db, { log: {} });
   await migrate(db, { log: {} }); // повторно — ничего не делает
   const mqtt = mqttFake;
+  const webpush = await createWebPush({ db, subject: 'https://iot.test', log: {} });
   api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
-    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' } }))
+    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' }, webpush }))
     .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
   hooks = createServer(internalRoutes({ db, config, log: {} }));
   await new Promise((r) => api.listen(0, r));
@@ -436,4 +439,28 @@ test('sessions, password change and TOTP on real SQL', { skip }, async () => {
   // выход
   assert.equal((await call(apiUrl, 'POST', '/api/auth/logout', {}, a1)).status, 204);
   assert.equal((await call(apiUrl, 'GET', '/api/me', null, a1)).status, 401);
+});
+
+test('web push subscription channel on real SQL', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'push@x.ru', password: 'password123' });
+  const auth = `Bearer ${reg.body.token}`;
+  const list = await call(apiUrl, 'GET', '/api/channels', null, auth);
+  assert.equal(Buffer.from(list.body.webpush_public_key, 'base64url').length, 65);
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const sub = (endpoint, p256dh = ecdh.getPublicKey().toString('base64url')) => ({
+    type: 'webpush', device: 'Chrome, Android',
+    subscription: { endpoint, keys: { p256dh, auth: crypto.randomBytes(16).toString('base64url') } },
+  });
+  const ep = 'https://fcm.googleapis.com/fcm/send/abc123';
+  const c1 = await call(apiUrl, 'POST', '/api/channels', sub(ep), auth);
+  assert.equal(c1.status, 201);
+  assert.equal(c1.body.channel.endpoint_host, 'fcm.googleapis.com');
+  assert.ok(!JSON.stringify(c1.body).includes('p256dh'));
+  const c2 = await call(apiUrl, 'POST', '/api/channels', sub(ep), auth); // тот же браузер подписался заново
+  assert.equal(c2.body.channel.id, c1.body.channel.id);
+  assert.equal((await call(apiUrl, 'POST', '/api/channels', sub('https://192.168.1.5/push'), auth)).status, 400);
+  assert.equal((await call(apiUrl, 'POST', '/api/channels', sub(ep + 'x', Buffer.alloc(65, 4).toString('base64url')), auth)).status, 400);
+  const { rows } = await db.query("SELECT count(*)::int AS n FROM server_settings WHERE key = 'vapid'");
+  assert.equal(rows[0].n, 1);
 });

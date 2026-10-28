@@ -3,10 +3,33 @@ import { h, mount, toast, modal, field, copyText, actionButton } from '../dom.js
 import { get, post, put, del } from '../api.js';
 import { relativeTime, errorMessage } from '../format.js';
 import { firmwaresSection } from './ota.js';
-import { securitySection } from './security.js';
+import { securitySection, describeAgent } from './security.js';
 
 export const LEVEL_OPTIONS = { info: 'Все уведомления', warning: 'Внимание и тревога', alert: 'Только тревога' };
 const TYPE_LABELS = { telegram: 'Telegram', webhook: 'Вебхук', webpush: 'Браузер' };
+
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIos = () => /iPhone|iPad/.test(navigator.userAgent);
+
+function b64uToBytes(s) {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4));
+  return Uint8Array.from(b, (c) => c.charCodeAt(0));
+}
+
+async function subscribePush(publicKey) {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw Object.assign(new Error('denied'), { code: 'push_denied' });
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  // ключ сервера сменился (переустановка) — старая подписка не подойдёт
+  if (sub && sub.options?.applicationServerKey) {
+    const cur = new Uint8Array(sub.options.applicationServerKey);
+    const want = b64uToBytes(publicKey);
+    if (cur.length !== want.length || cur.some((v, i) => v !== want[i])) { await sub.unsubscribe(); sub = null; }
+  }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(publicKey) });
+  return post('/api/channels', { type: 'webpush', subscription: sub.toJSON(), device: describeAgent(navigator.userAgent) });
+}
 
 const levelSelect = (value) => {
   const sel = h('select', null, ...Object.entries(LEVEL_OPTIONS).map(([k, v]) => h('option', { value: k }, v)));
@@ -73,6 +96,8 @@ function notificationsSection() {
   const section = h('section', { class: 'panel', 'aria-labelledby': 'notify-title' },
     h('div', { class: 'panel-head' }, h('h2', { id: 'notify-title', class: 'section-title' }, 'Куда присылать уведомления'), tools),
     h('p', { class: 'muted' }, 'Уведомления создают сценарии с действием «Уведомить». В ленте панели они есть всегда, а здесь можно добавить Telegram, вебхук или push в браузер.'),
+    isIos() && !pushSupported()
+      ? h('p', { class: 'field-hint' }, 'На iPhone push работает в установленной панели: «Поделиться» → «На экран „Домой“», затем откройте её оттуда.') : null,
     host);
 
   const load = async () => {
@@ -99,6 +124,17 @@ function notificationsSection() {
     }
     buttons.push(h('button', { class: 'btn', type: 'button', onclick: () => ownBotDialog(load) }, data.telegram_bot !== null ? 'Свой бот' : 'Telegram (свой бот)'));
     buttons.push(h('button', { class: 'btn', type: 'button', onclick: () => webhookDialog(load) }, 'Вебхук'));
+    if (data.webpush_public_key && pushSupported()) {
+      buttons.push(actionButton('Push в этот браузер', async () => {
+        try {
+          await subscribePush(data.webpush_public_key);
+          toast('Готово: уведомления будут приходить в этот браузер, даже когда панель закрыта');
+          await load();
+        } catch (e) {
+          toast(e.code === 'push_denied' ? 'Браузер запретил уведомления — разрешите их в настройках сайта' : errorMessage(e), 'error');
+        }
+      }));
+    }
     mount(tools, ...buttons);
 
     if (data.channels.length === 0) {

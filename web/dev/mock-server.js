@@ -256,7 +256,7 @@ async function api(req, res, url) {
     }, 700);
     return json(res, 202, { job });
   }
-  if (p === '/api/channels' && req.method === 'GET') return json(res, 200, { channels: [...channels.values()], telegram_bot: 'iot_demo_bot', webpush_public_key: null });
+  if (p === '/api/channels' && req.method === 'GET') return json(res, 200, { channels: [...channels.values()], telegram_bot: 'iot_demo_bot', webpush_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' });
   if (p === '/api/channels' && req.method === 'POST') {
     const c = { id: crypto.randomUUID(), type: body.type, name: body.name || (body.type === 'webhook' ? new URL(body.url).host : `Telegram ${body.chat_id}`),
       min_level: body.min_level || 'info', enabled: true, last_sent_at: null, last_error: null, created_at: now(),
@@ -275,7 +275,7 @@ async function api(req, res, url) {
   return json(res, 404, { error: 'not_found' });
 }
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname.startsWith('/api/')) return api(req, res, url);
