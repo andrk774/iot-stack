@@ -65,7 +65,7 @@ export function validateBridgeConfig(type, config = {}) {
 
 export function bridgeRoutes({ db, config, log = console, emqx = { kick: async () => false } }) {
   const r = new Router();
-  const auth = makeAuth(config);
+  const auth = makeAuth(config, db);
   const tokenCache = new Map(); // id -> { token, until } — scrypt на каждый запрос моста слишком дорог
 
   const own = async (userId, id) => {
@@ -77,13 +77,13 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
 
   // ---------- управление мостами (пользователь) ----------
   r.get('/api/bridges', async ({ req }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const { rows } = await db.query(`SELECT ${COLUMNS} FROM bridges b WHERE b.owner_id = $1 ORDER BY b.name`, [userId]);
     return { bridges: rows };
   });
 
   r.post('/api/bridges', async ({ req, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const name = str(body.name, 'name', { max: 64 });
     if (!BRIDGE_TYPES.includes(body.type)) throw new HttpError(400, 'validation', { field: 'type', reason: BRIDGE_TYPES.join('|') });
     const cfg = validateBridgeConfig(body.type, body.config);
@@ -102,10 +102,10 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
     return reply(201, { bridge: await own(userId, id), token });
   });
 
-  r.get('/api/bridges/:id', async ({ req, params }) => own(auth(req), params.id));
+  r.get('/api/bridges/:id', async ({ req, params }) => own(await auth(req), params.id));
 
   r.put('/api/bridges/:id', async ({ req, params, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const b = await own(userId, params.id);
     const name = str(body.name ?? b.name, 'name', { max: 64 });
     const cfg = validateBridgeConfig(b.type, body.config ?? b.config);
@@ -114,7 +114,7 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
   });
 
   r.post('/api/bridges/:id/token', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const b = await own(userId, params.id);
     const token = randomToken(24);
     await db.query('UPDATE bridges SET mqtt_password_hash = $2 WHERE id = $1', [b.id, await hashSecret(token)]);
@@ -124,7 +124,7 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
   });
 
   r.delete('/api/bridges/:id', async ({ req, params }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const b = await own(userId, params.id);
     await withTx(db, async (tx) => {
       await tx.query('DELETE FROM telemetry WHERE device_id IN (SELECT id FROM devices WHERE bridge_id = $1)', [b.id]);

@@ -130,6 +130,13 @@ textarea { font-family: var(--mono); font-size: 0.875rem; width: 100%; min-heigh
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .grid-3 { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 14px; align-items: start; }
 @media (max-width: 640px) { .grid-3 { grid-template-columns: 1fr; } }
+.grid-3.grid-even { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 640px) { .grid-3.grid-even { grid-template-columns: 1fr; } }
+.stack-lg { display: grid; gap: 28px; }
+.stack-lg > .stack + .stack, .stack-lg > div + div { border-top: 1px solid var(--line); padding-top: 24px; }
+.subhead { margin: 0; font-size: 1rem; font-weight: 600; }
+.qr { display: grid; place-items: center; padding: 8px; background: #fff; border-radius: var(--radius-s); justify-self: center; }
+.codes { columns: 2; font-family: var(--mono); line-height: 1.8; }
 .tag { display: inline-block; font-family: var(--mono); font-size: 0.8125rem; padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--sunken); color: var(--ink); }
 .ota-status { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .ota-status .list-error { flex-basis: 100%; }
@@ -260,6 +267,7 @@ progress { width: 160px; height: 8px; accent-color: var(--accent); }
 .rule-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .rule-title { font-size: 0.875rem; font-weight: 600; color: var(--muted); }
 .section-title { margin: 28px 0 10px; }
+.panel .section-title { margin: 0; }
 .editor { max-width: 860px; }
 .editor > .panel { display: grid; gap: 14px; }
 

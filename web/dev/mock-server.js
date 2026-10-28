@@ -149,6 +149,7 @@ function telemetry(id, q) {
   return { property: prop, points };
 }
 
+const totp = { enabled: false };
 const firmwares = new Map([
   ['f1', { id: 'f1', name: 'Теплица', version: '1.3.0', size: 912384, md5: 'a'.repeat(32), sha256: '3f9a1c0be41d7a55'.repeat(4), created_at: new Date(Date.now() - 86400e3).toISOString() }],
 ]);
@@ -167,7 +168,17 @@ async function api(req, res, url) {
   let x;
   if (p === '/api/auth/login' || p === '/api/auth/register') return json(res, 200, { token: 'demo.token.value', user: USER });
   if (!req.headers.authorization) return json(res, 401, { error: 'unauthorized' });
-  if (p === '/api/me') return json(res, 200, USER);
+  if (p === '/api/me') return json(res, 200, { ...USER, totp_enabled: totp.enabled, recovery_codes_left: totp.enabled ? 10 : 0 });
+  if (p === '/api/auth/logout') return json(res, 204);
+  if (p === '/api/auth/password') return json(res, 200, { ok: true, sessions_closed: 1 });
+  if (p === '/api/auth/totp/setup') return json(res, 200, { secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP', otpauth_url: `otpauth://totp/IoT%20localhost%3A${encodeURIComponent(USER.email)}?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=IoT+localhost&algorithm=SHA1&digits=6&period=30` });
+  if (p === '/api/auth/totp/enable') { totp.enabled = true; return json(res, 200, { enabled: true, recovery_codes: Array.from({ length: 10 }, (_, i) => `ab${i}c-d3fg-h4jk`) }); }
+  if (p === '/api/auth/totp/disable') { totp.enabled = false; return json(res, 200, { enabled: false }); }
+  if (p === '/api/sessions') return json(res, 200, { sessions: [
+    { id: 's1', current: true, created_at: ago(86400 * 2), last_seen_at: ago(5), user_agent: req.headers['user-agent'], ip: '91.144.1.20' },
+    { id: 's2', current: false, created_at: ago(86400 * 9), last_seen_at: ago(3600 * 20), user_agent: 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/129.0 Mobile Safari/537.36', ip: '176.59.3.4' },
+  ] });
+  if (p === '/api/sessions/revoke-others') return json(res, 200, { closed: 1 });
   if (p === '/api/devices' && req.method === 'GET') return json(res, 200, { devices: [...devices.values()] });
   if (p === '/api/devices' && req.method === 'POST') {
     const d = { id: rid('d', 8), name: body.name, state: 'new', provisioned: false, bridge_id: null, created_at: now(), last_seen: null, meta: null, last_values: {} };

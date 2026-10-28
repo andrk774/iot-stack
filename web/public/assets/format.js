@@ -115,6 +115,13 @@ const ERRORS = {
   firmware_not_found: 'Прошивка не найдена',
   firmware_limit_reached: 'В библиотеке уже 20 прошивок — удалите старые',
   payload_too_large: 'Файл слишком большой',
+  totp_required: 'Нужен код из приложения',
+  invalid_totp: 'Код не подошёл',
+  invalid_password: 'Неверный пароль',
+  totp_already_enabled: 'Двухфакторная защита уже включена',
+  totp_not_enabled: 'Двухфакторная защита не включена',
+  totp_setup_required: 'Начните подключение заново',
+  session_not_found: 'Сеанс уже завершён',
 };
 
 export function errorMessage(err) {

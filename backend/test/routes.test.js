@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import { createServer } from '../src/http.js';
 import { publicRoutes } from '../src/routes/public.js';
 import { internalRoutes } from '../src/routes/internal.js';
+import { accountRoutes } from '../src/routes/account.js';
+import { Router } from '../src/http.js';
+import crypto from 'node:crypto';
 import { hashSecret, signJwt, sha256 } from '../src/security.js';
 
 const config = {
@@ -18,7 +21,7 @@ const config = {
 };
 
 // --- крошечная in-memory "БД", понимающая только нужные запросы ---
-const store = { users: [], devices: [] };
+const store = { users: [], devices: [], sessions: [] };
 const db = {
   // транзакции: в памяти всё и так последовательно
   async connect() { return { query: (sql, p) => db.query(sql, p), release() {} }; },
@@ -27,11 +30,20 @@ const db = {
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(s) || s.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [], rowCount: 0 };
     if (s.startsWith('INSERT INTO users')) {
       if (store.users.some((u) => u.email === p[0])) throw Object.assign(new Error('dup'), { code: '23505' });
-      const u = { id: `u${store.users.length + 1}`, email: p[0], password_hash: p[1] };
+      const u = { id: crypto.randomUUID(), email: p[0], password_hash: p[1], totp_secret: null, totp_last_step: 0 };
       store.users.push(u);
       return { rows: [{ id: u.id, email: u.email }] };
     }
-    if (s.startsWith('SELECT id, email, password_hash FROM users')) {
+    if (s.startsWith('DELETE FROM sessions WHERE user_id = $1 AND expires_at') || s.startsWith('DELETE FROM sessions WHERE id IN')) return { rows: [], rowCount: 0 };
+    if (s.startsWith('INSERT INTO sessions')) {
+      const row = { id: crypto.randomUUID(), user_id: p[0], last_seen_at: new Date() };
+      store.sessions.push(row);
+      return { rows: [{ id: row.id }] };
+    }
+    if (s.startsWith('SELECT last_seen_at FROM sessions')) {
+      return { rows: store.sessions.filter((x) => x.id === p[0] && x.user_id === p[1]) };
+    }
+    if (s.startsWith('SELECT id, email, password_hash')) {
       return { rows: store.users.filter((u) => u.email === p[0]) };
     }
     if (s.startsWith('SELECT count(*)')) {
@@ -72,7 +84,7 @@ const mqtt = { connected: true, publish: async (t, v) => { published.push([t, v]
 
 let api; let hooks; let apiUrl; let hooksUrl;
 before(async () => {
-  api = createServer(publicRoutes({ db, mqtt, config }), { log: { error() {} } });
+  api = createServer(new Router().use(accountRoutes({ db, config })).use(publicRoutes({ db, mqtt, config })), { log: { error() {} } });
   hooks = createServer(internalRoutes({ db, config, log: { warn() {} } }));
   await new Promise((r) => api.listen(0, r));
   await new Promise((r) => hooks.listen(0, r));
@@ -147,12 +159,30 @@ test('full flow: register -> device -> provision -> mqtt auth -> command', async
   const cmd = await call(apiUrl, 'POST', `/api/devices/${deviceId}/commands`, { property: 'relay', value: true }, token);
   assert.equal(cmd.status, 202);
   assert.deepEqual(published.at(-1), [`dev/${deviceId}/relay/set`, 'true']);
+
+  // панель по MQTT: пароль — токен с живой сессией
+  const uid = login.body.user.id;
+  const web = (pw) => call(hooksUrl, 'POST', '/internal/mqtt/auth', { username: `u:${uid}`, password: pw, clientid: `web-${uid}-abcd` });
+  assert.equal((await web(token)).body.result, 'allow');
+  store.sessions = store.sessions.filter((x) => x.user_id !== uid);
+  assert.equal((await web(token)).body.result, 'deny');
+  assert.equal((await call(apiUrl, 'GET', '/api/me', null, token)).status, 401);
 });
 
 test('ownership, validation and limits', async () => {
-  const other = signJwt({ sub: 'u999' }, config.jwtSecret, 60);
-  const ownerToken = signJwt({ sub: 'u1' }, config.jwtSecret, 60);
+  const mk = (uid) => {
+    const sid = crypto.randomUUID();
+    store.sessions.push({ id: sid, user_id: uid, last_seen_at: new Date() });
+    return signJwt({ sub: uid, sid }, config.jwtSecret, 60);
+  };
+  const owner = store.users[0].id;
+  const other = mk(crypto.randomUUID());
+  const ownerToken = mk(owner);
+  // подпись верна, но сессии нет (отозвана) или токен старого формата без sid — 401
   const [d] = store.devices;
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${d.id}`, null, signJwt({ sub: owner, sid: crypto.randomUUID() }, config.jwtSecret, 60))).status, 401);
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${d.id}`, null, signJwt({ sub: owner }, config.jwtSecret, 60))).status, 401);
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${d.id}`, null, ownerToken)).status, 200);
   assert.equal((await call(apiUrl, 'GET', `/api/devices/${d.id}`, null, other)).status, 404);
   assert.equal((await call(apiUrl, 'GET', '/api/devices/../../etc', null, ownerToken)).status, 404);
   assert.equal((await call(apiUrl, 'POST', '/api/devices', { name: '' }, ownerToken)).status, 400);

@@ -2,15 +2,37 @@ import { HttpError } from '../http.js';
 import { DEVICE_ID_RE } from '../acl.js';
 import { verifyJwt } from '../security.js';
 
-/** Bearer JWT -> id пользователя или 401 */
-export function makeAuth(config) {
-  return (req) => {
+const TOUCH_MS = 5 * 60 * 1000;
+
+/** Проверить JWT и что его сессия не отозвана. null — недействителен. */
+export async function checkSessionToken(db, config, token) {
+  const payload = verifyJwt(token, config.jwtSecret);
+  if (!payload?.sub || typeof payload.sid !== 'string' || !/^[0-9a-f-]{36}$/.test(payload.sid)) return null;
+  const { rows } = await db.query(
+    'SELECT last_seen_at FROM sessions WHERE id = $1 AND user_id = $2 AND expires_at > now()', [payload.sid, payload.sub]);
+  if (!rows[0]) return null;
+  if (Date.now() - new Date(rows[0].last_seen_at).getTime() > TOUCH_MS) {
+    await db.query('UPDATE sessions SET last_seen_at = now() WHERE id = $1', [payload.sid]).catch(() => {});
+  }
+  return { userId: payload.sub, sid: payload.sid };
+}
+
+/**
+ * Bearer JWT -> id пользователя или 401. Токен действует, пока жива его сессия:
+ * выход, «завершить другие сеансы» и смена пароля отзывают его сразу.
+ *   const userId = await auth(req);   const { userId, sid } = await auth.session(req);
+ */
+export function makeAuth(config, db) {
+  const session = async (req) => {
     const h = req.headers.authorization || '';
     const token = h.startsWith('Bearer ') ? h.slice(7) : null;
-    const payload = verifyJwt(token, config.jwtSecret);
-    if (!payload?.sub) throw new HttpError(401, 'unauthorized');
-    return payload.sub;
+    const s = token ? await checkSessionToken(db, config, token) : null;
+    if (!s) throw new HttpError(401, 'unauthorized');
+    return s;
   };
+  const auth = async (req) => (await session(req)).userId;
+  auth.session = session;
+  return auth;
 }
 
 /** Проверить, что все устройства принадлежат пользователю. Возвращает Map id -> { id, meta } */

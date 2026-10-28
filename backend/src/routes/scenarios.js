@@ -8,7 +8,7 @@ const MAX_SCENARIOS = 200;
 
 export function scenarioRoutes({ db, config }) {
   const r = new Router();
-  const auth = makeAuth(config);
+  const auth = makeAuth(config, db);
 
   const parse = async (userId, body) => {
     let s;
@@ -39,13 +39,13 @@ export function scenarioRoutes({ db, config }) {
     JSON.stringify(s.actions), s.cooldown_sec];
 
   r.get('/api/scenarios', async ({ req }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const { rows } = await db.query(`SELECT ${COLUMNS} FROM scenarios WHERE owner_id = $1 ORDER BY name`, [userId]);
     return { scenarios: rows };
   });
 
   r.post('/api/scenarios', async ({ req, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const s = await parse(userId, body);
     const created = await withTx(db, async (tx) => {
       await lockScope(tx, 'scenarios', userId);
@@ -61,10 +61,10 @@ export function scenarioRoutes({ db, config }) {
     return reply(201, created);
   });
 
-  r.get('/api/scenarios/:id', async ({ req, params: p }) => own(auth(req), p.id));
+  r.get('/api/scenarios/:id', async ({ req, params: p }) => own(await auth(req), p.id));
 
   r.put('/api/scenarios/:id', async ({ req, params: p, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     await own(userId, p.id);
     const s = await parse(userId, body);
     const { rows } = await db.query(
@@ -77,7 +77,7 @@ export function scenarioRoutes({ db, config }) {
   });
 
   r.delete('/api/scenarios/:id', async ({ req, params: p }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     await own(userId, p.id);
     await db.query('DELETE FROM scenarios WHERE id = $1', [p.id]);
     return reply(204);
@@ -85,7 +85,7 @@ export function scenarioRoutes({ db, config }) {
 
   // Ручной запуск: scenario-runner слушает канал scenario_run
   r.post('/api/scenarios/:id/run', async ({ req, params: p }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const s = await own(userId, p.id);
     if (!s.enabled) throw new HttpError(409, 'scenario_disabled');
     await db.query("SELECT pg_notify('scenario_run', $1)", [s.id]);
@@ -94,7 +94,7 @@ export function scenarioRoutes({ db, config }) {
 
   // ---------- уведомления ----------
   r.get('/api/notifications', async ({ req, query }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
     const unreadOnly = query.unread === 'true';
     const { rows } = await db.query(
@@ -111,7 +111,7 @@ export function scenarioRoutes({ db, config }) {
   });
 
   r.post('/api/notifications/read', async ({ req, body }) => {
-    const userId = auth(req);
+    const userId = await auth(req);
     const ids = body.ids;
     if (ids !== undefined && (!Array.isArray(ids) || ids.length > 500 || !ids.every((x) => Number.isInteger(x)))) {
       throw new HttpError(400, 'validation', { field: 'ids', reason: 'массив id' });
