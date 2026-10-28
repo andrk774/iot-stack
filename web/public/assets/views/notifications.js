@@ -12,7 +12,7 @@ export function renderNotifications(root, _params, { refreshBadge }) {
       const { notifications } = await get('/api/notifications?limit=100');
       if (notifications.length === 0) {
         mount(list, h('div', { class: 'empty' }, h('h2', null, 'Уведомлений нет'),
-          h('p', null, 'Сюда пишут сценарии с действием «Уведомить».')));
+          h('p', null, 'Сюда пишут сценарии с действием «Уведомить». Telegram, вебхук и push в браузер подключаются в ', h('a', { href: '#/settings' }, 'настройках'), '.')));
         return;
       }
       mount(list, ...notifications.map((n) => h('article', { class: `note note-${n.level}${n.read_at ? '' : ' is-unread'}` },

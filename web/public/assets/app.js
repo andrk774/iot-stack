@@ -8,6 +8,7 @@ import { renderDevice } from './views/device.js';
 import { renderScenarios, renderScenarioEditor } from './views/scenarios.js';
 import { renderBridges } from './views/bridges.js';
 import { renderNotifications } from './views/notifications.js';
+import { renderSettings } from './views/settings.js';
 
 const app = document.getElementById('app');
 let cleanup = () => {};
@@ -20,6 +21,7 @@ const ROUTES = [
   [/^#\/scenarios$/, () => [renderScenarios, {}], 'scenarios'],
   [/^#\/bridges$/, () => [renderBridges, {}], 'bridges'],
   [/^#\/notifications$/, () => [renderNotifications, {}], 'notifications'],
+  [/^#\/settings$/, () => [renderSettings, {}], 'settings'],
 ];
 
 const NAV = [
@@ -27,6 +29,7 @@ const NAV = [
   ['scenarios', '#/scenarios', 'Сценарии'],
   ['bridges', '#/bridges', 'Мосты'],
   ['notifications', '#/notifications', 'Уведомления'],
+  ['settings', '#/settings', 'Настройки'],
 ];
 
 const LIVE_LABELS = { online: 'на связи', connecting: 'подключение…', offline: 'нет связи', error: 'ошибка доступа' };

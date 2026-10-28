@@ -5,7 +5,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { Pool } from '../../devtools/pgwire.js';
-import { migrate } from '../src/migrate.js';
+import { migrate, listMigrations } from '../src/migrate.js';
+import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from '../src/routes/channels.js';
+import { Dispatcher } from '../src/notify/dispatcher.js';
 import { createServer, Router } from '../src/http.js';
 import { publicRoutes } from '../src/routes/public.js';
 import { scenarioRoutes } from '../src/routes/scenarios.js';
@@ -22,7 +24,13 @@ let admin; let db; let api; let hooks; let apiUrl; let hooksUrl;
 const published = [];
 const kicked = [];
 const emqx = { kick: async (id) => { kicked.push(id); return true; } };
+const testSent = [];
+const testSenders = {
+  webhook: async (ch, n) => { testSent.push([ch.id, n.message]); },
+  telegram: async (ch, n) => { testSent.push([ch.id, n.message]); },
+};
 const config = {
+  telegramBotToken: '1:x', webhookAllowPrivate: false,
   jwtSecret: 'j'.repeat(40), jwtTtlSec: 3600, allowRegistration: true, maxDevicesPerUser: 5, maxBridgeDevices: 3,
   claimTtlMin: 30, publicHost: 'iot.test', mqttPublicPort: 8883, serviceUsers: { backend: 'b', ingest: 'i', scenarios: 's' },
 };
@@ -51,7 +59,8 @@ before(async () => {
   await migrate(db, { log: {} }); // повторно — ничего не делает
   const mqtt = { connected: true, publish: async (t, v) => { published.push([t, v]); } };
   api = createServer(new Router().use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
-    .use(bridgeRoutes({ db, config, log: {}, emqx })), { log: { error: (...a) => console.error(...a) } });
+    .use(bridgeRoutes({ db, config, log: {}, emqx }))
+    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' } })), { log: { error: (...a) => console.error(...a) } });
   hooks = createServer(internalRoutes({ db, config, log: {} }));
   await new Promise((r) => api.listen(0, r));
   await new Promise((r) => hooks.listen(0, r));
@@ -80,7 +89,7 @@ const call = async (base, method, path, body, auth) => {
 
 test('migrations recorded', { skip }, async () => {
   const { rows } = await db.query('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(rows.map((r) => r.version), ['002']);
+  assert.deepEqual(rows.map((r) => r.version), (await listMigrations()).map((m) => m.version));
 });
 
 test('end-to-end on real SQL', { skip }, async () => {
@@ -246,4 +255,58 @@ test('scenario trigger NOTIFY fires on definition change only', { skip }, async 
   await db.query('UPDATE scenarios SET name = $2 WHERE id = $1', [s.id, 'n2']);
   await c.query('SELECT 1'); // получить накопившиеся уведомления
   assert.equal(got.filter((x) => x.includes('scenarios_changed')).length, 2); // insert + update name
+});
+
+test('notification channels and dispatch on real SQL', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'ch@x.ru', password: 'password123' });
+  const auth = `Bearer ${reg.body.token}`;
+  const uid = reg.body.user.id;
+  const other = await call(apiUrl, 'POST', '/api/auth/register', { email: 'ch2@x.ru', password: 'password123' });
+  const auth2 = `Bearer ${other.body.token}`;
+
+  assert.equal((await call(apiUrl, 'POST', '/api/channels', { type: 'webhook', url: 'http://example.com/' }, auth)).status, 400);
+  assert.equal((await call(apiUrl, 'POST', '/api/channels', { type: 'webhook', url: 'https://10.0.0.5/x' }, auth)).status, 400);
+  const wh = await call(apiUrl, 'POST', '/api/channels', { type: 'webhook', url: 'https://example.com/hook', min_level: 'warning' }, auth);
+  assert.equal(wh.status, 201);
+  assert.ok(wh.body.secret.length >= 30);
+  assert.equal(wh.body.channel.url, 'https://example.com/hook');
+  const tg = await call(apiUrl, 'POST', '/api/channels', { type: 'telegram', bot_token: `123456:${'A'.repeat(35)}`, chat_id: '-100123' }, auth);
+  assert.equal(tg.status, 201);
+  assert.equal(tg.body.channel.own_bot, true);
+  const list = await call(apiUrl, 'GET', '/api/channels', null, auth);
+  assert.equal(list.body.channels.length, 2);
+  assert.equal(list.body.telegram_bot, 'iot_test_bot');
+  assert.ok(!JSON.stringify(list.body).includes('A'.repeat(35)), 'токен бота не отдаётся');
+  assert.ok(!JSON.stringify(list.body).includes(wh.body.secret), 'секрет вебхука не отдаётся');
+  // чужой канал недоступен
+  assert.equal((await call(apiUrl, 'PUT', `/api/channels/${wh.body.channel.id}`, { enabled: false }, auth2)).status, 404);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/channels/${wh.body.channel.id}`, null, auth2)).status, 404);
+
+  // привязка платформенного бота: код одноразовый
+  const link = await call(apiUrl, 'POST', '/api/channels/telegram-link', {}, auth);
+  const code = new URL(link.body.url).searchParams.get('start');
+  assert.match(link.body.url, /^https:\/\/t\.me\/iot_test_bot\?start=/);
+  assert.equal(await linkTelegramChat(db, code, { id: '555', title: 'Андрей' }), 'linked');
+  assert.equal(await linkTelegramChat(db, code, { id: '555', title: 'Андрей' }), 'invalid');
+  const link2 = await call(apiUrl, 'POST', '/api/channels/telegram-link', {}, auth);
+  assert.equal(await linkTelegramChat(db, new URL(link2.body.url).searchParams.get('start'), { id: '555' }), 'linked'); // тот же чат — без дубля
+  const after = await call(apiUrl, 'GET', '/api/channels', null, auth);
+  assert.equal(after.body.channels.filter((c) => c.type === 'telegram' && !c.own_bot).length, 1);
+
+  // проверка канала
+  assert.equal((await call(apiUrl, 'POST', `/api/channels/${wh.body.channel.id}/test`, {}, auth)).status, 200);
+
+  // рассылка: уведомление уровня info не уходит в вебхук с порогом warning
+  testSent.length = 0;
+  await db.query("INSERT INTO notifications (owner_id, level, message) VALUES ($1, 'info', 'i1'), ($1, 'alert', 'a1')", [uid]);
+  const d = new Dispatcher({ db, log: {}, sleep: async () => {}, senders: testSenders });
+  await d.kick();
+  const whId = wh.body.channel.id;
+  assert.deepEqual(testSent.filter(([id]) => id === whId).map(([, m]) => m), ['a1']);
+  assert.equal(testSent.filter(([, m]) => m === 'i1').length, 2); // два telegram-канала
+  const { rows: pending } = await db.query('SELECT count(*)::int AS n FROM notifications WHERE dispatched_at IS NULL');
+  assert.equal(pending[0].n, 0);
+
+  assert.equal(await unlinkTelegramChat(db, '555'), 1);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/channels/${whId}`, null, auth)).status, 204);
 });
