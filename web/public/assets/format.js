@@ -105,6 +105,13 @@ const ERRORS = {
   bridge_not_found: 'Мост не найден',
   too_many_requests: 'Слишком много запросов, подождите минуту',
   network: 'Нет связи с сервером',
+  channel_not_found: 'Канал не найден',
+  channel_exists: 'Такой канал уже подключён',
+  channel_limit_reached: 'Достигнут лимит каналов (20)',
+  channel_send_failed: 'Не удалось отправить',
+  telegram_not_configured: 'Платформенный бот не настроен: TELEGRAM_BOT_TOKEN в .env',
+  telegram_unavailable: 'Бот Telegram ещё не запустился, попробуйте через минуту',
+  webpush_not_configured: 'Push-уведомления не настроены на сервере',
 };
 
 export function errorMessage(err) {

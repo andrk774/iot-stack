@@ -28,6 +28,11 @@ export function loadConfig(env = process.env) {
       ingest: required('MQTT_INGEST_PASSWORD'),
       scenarios: required('MQTT_SCENARIOS_PASSWORD'),
     },
+    // Уведомления: платформенный Telegram-бот (необязательно) и вебхуки
+    telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
+    telegramApiUrl: env.TELEGRAM_API_URL || 'https://api.telegram.org',
+    // true — разрешить вебхуки на http:// и адреса внутренних сетей (только для локальной разработки)
+    webhookAllowPrivate: env.WEBHOOK_ALLOW_PRIVATE === 'true',
     publicPort: 8000,
     internalPort: 8001,
   };

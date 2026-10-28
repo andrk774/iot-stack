@@ -149,6 +149,11 @@ function telemetry(id, q) {
   return { property: prop, points };
 }
 
+const channels = new Map([
+  ['c-tg', { id: 'c-tg', type: 'telegram', name: 'Telegram: Андрей', chat_id: '5551234', chat_title: 'Андрей', own_bot: false, min_level: 'info', enabled: true, last_sent_at: new Date(Date.now() - 3600e3).toISOString(), last_error: null }],
+  ['c-wh', { id: 'c-wh', type: 'webhook', name: 'hooks.example.com', url: 'https://hooks.example.com/iot', min_level: 'alert', enabled: true, last_sent_at: null, last_error: '2026-10-28T10:00:00Z: HTTP 502' }],
+]);
+
 async function api(req, res, url) {
   const p = url.pathname;
   const m = (re) => re.exec(p);
@@ -205,6 +210,22 @@ async function api(req, res, url) {
     if (req.method === 'PUT') { Object.assign(b, { name: body.name, config: body.config }); return json(res, 200, b); }
     if (req.method === 'DELETE') { bridges.delete(b.id); return json(res, 204); }
     return json(res, 200, b);
+  }
+  if (p === '/api/channels' && req.method === 'GET') return json(res, 200, { channels: [...channels.values()], telegram_bot: 'iot_demo_bot', webpush_public_key: null });
+  if (p === '/api/channels' && req.method === 'POST') {
+    const c = { id: crypto.randomUUID(), type: body.type, name: body.name || (body.type === 'webhook' ? new URL(body.url).host : `Telegram ${body.chat_id}`),
+      min_level: body.min_level || 'info', enabled: true, last_sent_at: null, last_error: null, created_at: now(),
+      ...(body.type === 'webhook' ? { url: body.url } : { chat_id: body.chat_id, own_bot: true }) };
+    channels.set(c.id, c);
+    return json(res, 201, { channel: c, secret: body.type === 'webhook' ? crypto.randomBytes(24).toString('base64url') : undefined });
+  }
+  if (p === '/api/channels/telegram-link') return json(res, 200, { url: 'https://t.me/iot_demo_bot?start=demo', expires_at: new Date(Date.now() + 900e3).toISOString() });
+  if ((x = m(/^\/api\/channels\/([\w-]+)\/test$/))) { const c = channels.get(x[1]); c.last_sent_at = now(); c.last_error = null; return json(res, 200, { ok: true }); }
+  if ((x = m(/^\/api\/channels\/([\w-]+)$/))) {
+    const c = channels.get(x[1]);
+    if (!c) return json(res, 404, { error: 'channel_not_found' });
+    if (req.method === 'PUT') { Object.assign(c, body); return json(res, 200, c); }
+    if (req.method === 'DELETE') { channels.delete(c.id); return json(res, 204); }
   }
   return json(res, 404, { error: 'not_found' });
 }
