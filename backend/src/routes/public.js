@@ -1,4 +1,4 @@
-import { Router, HttpError, reply, str } from '../http.js';
+import { Router, HttpError, reply, str, RawBody } from '../http.js';
 import { DEVICE_ID_RE, PROP_RE } from '../acl.js';
 import { hashSecret, randomToken, sha256, newDeviceId } from '../security.js';
 import { makeAuth, withTx, lockScope, roleSql, accessSql, requireRole, resolveHome } from './common.js';
@@ -6,7 +6,39 @@ import { isSettable } from '../../../shared/scenario.js';
 
 const BUCKET_RE = /^(\d{1,4})(s|m|h|d)$/;
 const BUCKET_UNITS = { s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
-const MAX_RANGE_MS = 92 * 24 * 3600 * 1000;
+const MAX_RANGE_MS = 92 * 24 * 3600 * 1000;      // сырые данные хранятся 90 дней
+const MAX_HOURLY_RANGE_MS = 731 * 24 * 3600 * 1000; // почасовые агрегаты — 2 года
+const CSV_MAX_ROWS = 200_000;
+const HOUR_MS = 3600 * 1000;
+const UNIT_MS = { s: 1000, m: 60_000, h: HOUR_MS, d: 24 * HOUR_MS };
+
+/**
+ * Разобрать from/to/bucket. Шаг от часа (или диапазон длиннее 92 дней) берётся из почасовых агрегатов:
+ * так месяц и год строятся быстро и после удаления сырых данных.
+ */
+export function telemetryQuery(query, now = new Date()) {
+  const to = query.to ? new Date(query.to) : now;
+  const from = query.from ? new Date(query.from) : new Date(to.getTime() - 24 * HOUR_MS);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+    throw new HttpError(400, 'validation', { field: 'from/to', reason: 'ISO dates, from < to' });
+  }
+  let bucket = null;
+  let interval = null;
+  let bucketMs = 0;
+  if (query.bucket) {
+    const m = BUCKET_RE.exec(query.bucket);
+    if (!m || Number(m[1]) === 0) throw new HttpError(400, 'validation', { field: 'bucket', reason: 'e.g. 30s, 5m, 1h, 1d' });
+    bucket = query.bucket;
+    interval = `${m[1]} ${BUCKET_UNITS[m[2]]}`;
+    bucketMs = Number(m[1]) * UNIT_MS[m[2]];
+  }
+  const span = to - from;
+  const hourly = bucket !== null && bucketMs >= HOUR_MS && bucketMs % HOUR_MS === 0;
+  if (span > (hourly ? MAX_HOURLY_RANGE_MS : MAX_RANGE_MS)) {
+    throw new HttpError(400, 'validation', { field: 'from/to', reason: hourly ? 'range <= 2 years' : 'range <= 92 days (для длиннее — bucket от 1h)' });
+  }
+  return { from, to, bucket, interval, hourly };
+}
 
 export const DEVICE_COLUMNS = `id, owner_id, room_id, name, state, meta, last_values, last_seen, created_at, provisioned_at, bridge_id,
   (mqtt_password_hash IS NOT NULL OR bridge_id IS NOT NULL) AS provisioned`;
@@ -30,6 +62,37 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
     requireRole(rows[0]?.my_role, min, 'device_not_found');
     return rows[0];
   };
+
+  async function fetchTelemetry(deviceId, property, q, limit) {
+    if (q.hourly) {
+      // среднее по часам, взвешенное числом точек; min/max — по часам
+      const { rows } = await db.query(
+        `SELECT time_bucket($1::interval, bucket) AS t,
+                sum(avg * n) / nullif(sum(n), 0) AS avg, min(min) AS min, max(max) AS max, sum(n)::int AS n
+         FROM telemetry_hourly
+         WHERE device_id = $2 AND property = $3 AND bucket >= $4 AND bucket < $5
+         GROUP BY t HAVING sum(n) > 0 ORDER BY t LIMIT $6`,
+        [q.interval, deviceId, property, q.from, q.to, limit]);
+      return rows;
+    }
+    if (q.bucket) {
+      const { rows } = await db.query(
+        `SELECT time_bucket($1::interval, time) AS t,
+                avg(value_num) AS avg, min(value_num) AS min, max(value_num) AS max, count(*)::int AS n
+         FROM telemetry
+         WHERE device_id = $2 AND property = $3 AND time >= $4 AND time < $5
+         GROUP BY t ORDER BY t LIMIT $6`,
+        [q.interval, deviceId, property, q.from, q.to, limit]);
+      return rows;
+    }
+    const { rows } = await db.query(
+      `SELECT time AS t, value_num AS v, value_text AS s
+       FROM telemetry
+       WHERE device_id = $1 AND property = $2 AND time >= $3 AND time < $4
+       ORDER BY time DESC LIMIT $5`,
+      [deviceId, property, q.from, q.to, limit]);
+    return rows.reverse();
+  }
 
   r.get('/api/health', async () => ({ ok: true, mqtt: Boolean(mqtt.connected) }));
 
@@ -140,38 +203,47 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
     const userId = await auth(req);
     const device = await loadDevice(userId, params.id, 'view');
     const property = str(query.property, 'property', { max: 32, re: PROP_RE });
+    const q = telemetryQuery(query);
+    const rows = await fetchTelemetry(device.id, property, q, Math.min(Math.max(Number(query.limit) || 1000, 1), 10000));
+    return { property, from: q.from, to: q.to, ...(q.bucket ? { bucket: q.bucket, source: q.hourly ? 'hourly' : 'raw' } : {}), points: rows };
+  });
 
-    const to = query.to ? new Date(query.to) : new Date();
-    const from = query.from ? new Date(query.from) : new Date(to.getTime() - 24 * 3600 * 1000);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
-      throw new HttpError(400, 'validation', { field: 'from/to', reason: 'ISO dates, from < to' });
+  // Выгрузка в CSV: несколько свойств, длинный формат «время, свойство, значение».
+  // format=excel — разделитель «;», десятичная запятая и BOM: так файл сразу открывается в русском Excel.
+  r.get('/api/devices/:id/telemetry.csv', async ({ req, params, query }) => {
+    const userId = await auth(req);
+    const device = await loadDevice(userId, params.id, 'view');
+    const props = String(query.properties ?? query.property ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    if (!props.length || props.length > 16 || !props.every((x) => PROP_RE.test(x))) {
+      throw new HttpError(400, 'validation', { field: 'properties', reason: 'через запятую, до 16' });
     }
-    if (to - from > MAX_RANGE_MS) throw new HttpError(400, 'validation', { field: 'from/to', reason: 'range <= 92 days' });
-    const limit = Math.min(Math.max(Number(query.limit) || 1000, 1), 10000);
-
-    if (query.bucket) {
-      const m = BUCKET_RE.exec(query.bucket);
-      if (!m || Number(m[1]) === 0) throw new HttpError(400, 'validation', { field: 'bucket', reason: 'e.g. 30s, 5m, 1h, 1d' });
-      const interval = `${m[1]} ${BUCKET_UNITS[m[2]]}`;
-      const { rows } = await db.query(
-        `SELECT time_bucket($1::interval, time) AS t,
-                avg(value_num) AS avg, min(value_num) AS min, max(value_num) AS max, count(*)::int AS n
-         FROM telemetry
-         WHERE device_id = $2 AND property = $3 AND time >= $4 AND time < $5
-         GROUP BY t ORDER BY t LIMIT $6`,
-        [interval, device.id, property, from, to, limit],
-      );
-      return { property, from, to, bucket: query.bucket, points: rows };
+    const q = telemetryQuery(query);
+    const excel = query.format === 'excel';
+    const sep = excel ? ';' : ',';
+    const num = (v) => (v === null || v === undefined ? '' : excel ? String(v).replace('.', ',') : String(v));
+    const cell = (v) => {
+      const t = String(v ?? '');
+      return /[",;\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
+    const lines = [q.bucket ? ['time', 'property', 'avg', 'min', 'max', 'count'].join(sep) : ['time', 'property', 'value'].join(sep)];
+    let total = 0;
+    for (const prop of props) {
+      const rows = await fetchTelemetry(device.id, prop, q, CSV_MAX_ROWS - total);
+      total += rows.length;
+      for (const r of rows) {
+        const t = new Date(r.t).toISOString();
+        lines.push(q.bucket
+          ? [t, prop, num(r.avg), num(r.min), num(r.max), r.n].join(sep)
+          : [t, prop, r.v !== null && r.v !== undefined ? num(r.v) : cell(r.s)].join(sep));
+      }
+      if (total >= CSV_MAX_ROWS) break;
     }
-
-    const { rows } = await db.query(
-      `SELECT time AS t, value_num AS v, value_text AS s
-       FROM telemetry
-       WHERE device_id = $1 AND property = $2 AND time >= $3 AND time < $4
-       ORDER BY time DESC LIMIT $5`,
-      [device.id, property, from, to, limit],
-    );
-    return { property, from, to, points: rows.reverse() };
+    const body = Buffer.from((excel ? '﻿' : '') + lines.join('\r\n') + '\r\n', 'utf8');
+    const safeName = `${device.id}_${q.from.toISOString().slice(0, 10)}_${q.to.toISOString().slice(0, 10)}.csv`;
+    return new RawBody(body, 'text/csv; charset=utf-8', {
+      'content-disposition': `attachment; filename="${safeName}"`,
+      ...(total >= CSV_MAX_ROWS ? { 'x-truncated': 'true' } : {}),
+    });
   });
 
   // ---------- привязка устройства (вызывает само устройство) ----------

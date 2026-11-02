@@ -157,6 +157,8 @@ export const RANGES = {
   '24h': { label: 'Сутки', ms: 24 * 3600e3, bucket: '5m' },
   '7d': { label: 'Неделя', ms: 7 * 24 * 3600e3, bucket: '1h' },
   '30d': { label: 'Месяц', ms: 30 * 24 * 3600e3, bucket: '6h' },
+  '90d': { label: '3 мес', ms: 90 * 24 * 3600e3, bucket: '1d' },
+  '365d': { label: 'Год', ms: 365 * 24 * 3600e3, bucket: '1d' },
 };
 
 /** Ответ /telemetry -> [{t: ms, v, min, max}] */

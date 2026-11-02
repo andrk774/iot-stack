@@ -1,7 +1,7 @@
 import { h, mount, toast, copyText, actionButton, modal, field } from '../dom.js';
-import { get, post, put, del } from '../api.js';
+import { get, post, put, del, getToken } from '../api.js';
 import { store } from '../store.js';
-import { lineChart } from '../chart.js';
+import { seriesChart } from '../chart.js';
 import {
   deviceProps, coerce, formatValue, relativeTime, errorMessage, RANGES, seriesFromTelemetry,
 } from '../format.js';
@@ -97,41 +97,114 @@ export function tile(device, p, { withDevice = false } = {}) {
     control(device, p, v));
 }
 
+const MAX_SERIES = 4;
+
+/** Скачать файл по API с токеном (ссылка с заголовком Authorization невозможна) */
+async function downloadCsv(url, fallbackName) {
+  const res = await fetch(url, { headers: { authorization: `Bearer ${getToken()}` } });
+  if (!res.ok) throw Object.assign(new Error('csv'), { code: res.status === 400 ? 'validation' : `http_${res.status}` });
+  const blob = await res.blob();
+  const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || fallbackName;
+  const a = h('a', { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  if (res.headers.get('x-truncated')) toast('Выгружены первые 200 000 строк — сузьте период', 'error');
+}
+
 function chartPanel(device) {
   const numeric = deviceProps(device).filter((p) => p.type !== 'string');
   if (numeric.length === 0) return null;
-  let prop = numeric[0];
+  // выбранные серии: свойства этого устройства и, для сравнения, других
+  let selected = [{ deviceId: device.id, prop: numeric[0].name }];
   let range = '24h';
   const body = h('div', { class: 'chart-body' });
-  const select = h('select', { 'aria-label': 'Свойство' },
-    ...numeric.map((p) => h('option', { value: p.name }, p.name)));
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Свойства на графике' });
   const tabs = h('div', { class: 'segmented', role: 'tablist' });
+  const compare = h('select', { 'aria-label': 'Сравнить с другим устройством' });
 
-  const load = async () => {
+  const specOf = (deviceId, prop) => deviceProps(store.devices.get(deviceId)).find((p) => p.name === prop);
+  const labelOf = (sel) => (sel.deviceId === device.id ? sel.prop : `${store.devices.get(sel.deviceId)?.name || '?'} · ${sel.prop}`);
+  const isOn = (deviceId, prop) => selected.some((x) => x.deviceId === deviceId && x.prop === prop);
+
+  const window_ = () => {
     const r = RANGES[range];
     const to = Date.now();
-    const from = to - r.ms;
-    const q = new URLSearchParams({ property: prop.name, from: new Date(from).toISOString(), to: new Date(to).toISOString(), limit: '5000' });
-    if (r.bucket) q.set('bucket', r.bucket);
+    return { r, to, from: to - r.ms };
+  };
+
+  const load = async () => {
+    const { r, from, to } = window_();
     mount(body, h('p', { class: 'chart-empty' }, 'Загрузка…'));
     try {
-      const data = await get(`/api/devices/${device.id}/telemetry?${q}`);
-      mount(body, lineChart(seriesFromTelemetry(data), { type: prop.type, unit: prop.unit, from, to, width: body.clientWidth || 720 }));
+      const series = await Promise.all(selected.map(async (sel) => {
+        const q = new URLSearchParams({ property: sel.prop, from: new Date(from).toISOString(), to: new Date(to).toISOString(), limit: '5000' });
+        if (r.bucket) q.set('bucket', r.bucket);
+        const data = await get(`/api/devices/${sel.deviceId}/telemetry?${q}`);
+        const spec = specOf(sel.deviceId, sel.prop);
+        return { label: labelOf(sel), points: seriesFromTelemetry(data), type: spec?.type, unit: spec?.unit };
+      }));
+      mount(body, seriesChart(series, { from, to, width: body.clientWidth || 720 }));
     } catch (e) {
       mount(body, h('p', { class: 'chart-empty' }, errorMessage(e)));
     }
   };
+
+  const drawChips = () => {
+    mount(chips, ...numeric.map((p) => h('button', {
+      type: 'button', class: `chip${isOn(device.id, p.name) ? ' is-on' : ''}`, 'aria-pressed': String(isOn(device.id, p.name)),
+      onclick: () => {
+        if (isOn(device.id, p.name)) {
+          if (selected.length === 1) return;
+          selected = selected.filter((x) => !(x.deviceId === device.id && x.prop === p.name));
+        } else {
+          if (selected.length >= MAX_SERIES) { toast(`На графике до ${MAX_SERIES} линий`); return; }
+          selected.push({ deviceId: device.id, prop: p.name });
+        }
+        drawChips();
+        load();
+      },
+    }, p.name)),
+    ...selected.filter((x) => x.deviceId !== device.id).map((x) => h('button', {
+      type: 'button', class: 'chip is-on', title: 'Убрать с графика',
+      onclick: () => { selected = selected.filter((y) => y !== x); drawChips(); load(); },
+    }, `${labelOf(x)} ✕`)));
+    const others = [...store.devices.values()].filter((d) => d.id !== device.id)
+      .flatMap((d) => deviceProps(d).filter((p) => p.type !== 'string' && !isOn(d.id, p.name)).map((p) => [d, p]))
+      .sort(([a], [b]) => a.name.localeCompare(b.name, 'ru'));
+    mount(compare, h('option', { value: '' }, 'сравнить с…'),
+      ...others.map(([d, p]) => h('option', { value: `${d.id}|${p.name}` }, `${d.name} · ${p.name}`)));
+    compare.hidden = others.length === 0;
+  };
+  compare.addEventListener('change', () => {
+    if (!compare.value) return;
+    if (selected.length >= MAX_SERIES) { toast(`На графике до ${MAX_SERIES} линий`); compare.value = ''; return; }
+    const [deviceId, prop] = compare.value.split('|');
+    selected.push({ deviceId, prop });
+    drawChips();
+    load();
+  });
 
   const drawTabs = () => mount(tabs, ...Object.entries(RANGES).map(([k, r]) => h('button', {
     type: 'button', role: 'tab', 'aria-selected': String(k === range), class: k === range ? 'is-active' : '',
     onclick: () => { range = k; drawTabs(); load(); },
   }, r.label)));
 
-  select.addEventListener('change', () => { prop = numeric.find((p) => p.name === select.value); load(); });
+  const csv = actionButton('CSV', async () => {
+    const { r, from, to } = window_();
+    const props = selected.filter((x) => x.deviceId === device.id).map((x) => x.prop);
+    const q = new URLSearchParams({ properties: props.join(','), from: new Date(from).toISOString(), to: new Date(to).toISOString(), format: 'excel' });
+    if (r.bucket) q.set('bucket', r.bucket);
+    try { await downloadCsv(`/api/devices/${device.id}/telemetry.csv?${q}`, `${device.id}.csv`); } catch (e) { toast(errorMessage(e), 'error'); }
+  }, 'btn btn-small');
+  csv.title = 'Выгрузить выбранные свойства этого устройства за период (для Excel)';
+
+  drawChips();
   drawTabs();
   load();
   return h('section', { class: 'panel' },
-    h('div', { class: 'panel-head' }, h('h2', null, 'История'), h('div', { class: 'panel-tools' }, select, tabs)),
+    h('div', { class: 'panel-head' }, h('h2', null, 'История'), h('div', { class: 'panel-tools' }, tabs, csv)),
+    h('div', { class: 'panel-head', style: { marginBottom: '8px' } }, chips, compare),
     body);
 }
 

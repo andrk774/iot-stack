@@ -3,7 +3,7 @@ import mqttLib from 'mqtt';
 import crypto from 'node:crypto';
 import { loadConfig } from './config.js';
 import { createServer, Router } from './http.js';
-import { migrate } from './migrate.js';
+import { migrate, backfillAggregates } from './migrate.js';
 import { createEmqxAdmin } from './emqx.js';
 import { publicRoutes } from './routes/public.js';
 import { scenarioRoutes } from './routes/scenarios.js';
@@ -34,6 +34,8 @@ for (let attempt = 1; ; attempt++) {
     await new Promise((r) => setTimeout(r, 3000));
   }
 }
+
+backfillAggregates(db).catch((e) => console.error(`telemetry_hourly backfill: ${e.message}`));
 
 // MQTT-клиент бэкенда: отправка команд устройствам.
 // EMQX аутентифицирует его через наш же внутренний хук, поэтому стартуем HTTP раньше.

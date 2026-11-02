@@ -2,6 +2,8 @@
 # Все тесты проекта одним запуском (Node 22, Python 3, g++, bash).
 #   devtools/test-all.sh                       — без PostgreSQL
 #   PG_TEST_URL=postgres://iot@127.0.0.1:5432/postgres devtools/test-all.sh   — плюс интеграция с реальной БД
+#   PG_TS_URL=postgres://iot@127.0.0.1:5433/postgres                        — плюс настоящий TimescaleDB
+#     (например: docker run -d -p 5433:5432 -e POSTGRES_USER=iot -e POSTGRES_HOST_AUTH_METHOD=trust timescale/timescaledb:2.17.2-pg16)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 failed=()
@@ -43,6 +45,7 @@ run "backup (ротация)"              bash backup/test.sh ${PG_TEST_URL:+"$
 run "docker compose config"         docker compose --env-file .env.example --profile zigbee --profile esphome --profile generic config --quiet
 run "shell syntax"                  bash -c 'bash -n setup.sh && bash -n backup/backup.sh && bash -n backup/restore.sh'
 [ -z "${PG_TEST_URL:-}" ] && echo "(интеграция с PostgreSQL пропущена: задайте PG_TEST_URL)"
+[ -z "${PG_TS_URL:-}" ] && echo "(проверка на TimescaleDB пропущена: задайте PG_TS_URL)"
 
 if [ ${#failed[@]} -gt 0 ]; then echo "Упали: ${failed[*]}"; exit 1; fi
 if [ ${#skipped[@]} -gt 0 ]; then echo "Все запущенные проверки прошли; пропущено: ${skipped[*]}"; exit 0; fi

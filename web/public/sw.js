@@ -1,6 +1,6 @@
 // Service worker панели: работа без сети (последняя загруженная версия) и push-уведомления.
 // Стратегия «сначала сеть»: свежие файлы панели, а без связи — из кеша. API не кешируется.
-const CACHE = 'iot-panel-8fb6e2ca64';
+const CACHE = 'iot-panel-4162933831';
 // все файлы панели и версия кеша: node web/dev/update-sw.js (сверяет web/test/pwa.test.js)
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png',

@@ -325,3 +325,18 @@ progress { width: 160px; height: 8px; accent-color: var(--accent); }
 .day.is-on { background: var(--accent-soft); color: var(--ink); border-color: var(--accent); }
 .rule-head { gap: 10px; }
 .rule-head > select { margin-right: auto; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 8px; font-size: 0.875rem; color: var(--muted); }
+.chart-key { display: inline-flex; align-items: center; gap: 6px; }
+.chart-swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); background: var(--surface); color: var(--muted); border-radius: 999px; padding: 4px 10px; font: inherit; font-size: 0.8125rem; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.chip.is-on { color: var(--ink); border-color: var(--accent); background: var(--accent-soft); }
+.chart-line.chart-s0 { stroke: var(--accent); } .chart-dot.chart-s0, .chart-swatch.chart-s0 { fill: var(--accent); background: var(--accent); }
+.chart-line.chart-s1 { stroke: #d9480f; } .chart-dot.chart-s1, .chart-swatch.chart-s1 { fill: #d9480f; background: #d9480f; }
+.chart-line.chart-s2 { stroke: #2b8a3e; } .chart-dot.chart-s2, .chart-swatch.chart-s2 { fill: #2b8a3e; background: #2b8a3e; }
+.chart-line.chart-s3 { stroke: #9c36b5; } .chart-dot.chart-s3, .chart-swatch.chart-s3 { fill: #9c36b5; background: #9c36b5; }
+@media (prefers-color-scheme: dark) {
+  .chart-line.chart-s1 { stroke: #ff8a50; } .chart-dot.chart-s1, .chart-swatch.chart-s1 { fill: #ff8a50; background: #ff8a50; }
+  .chart-line.chart-s2 { stroke: #51cf66; } .chart-dot.chart-s2, .chart-swatch.chart-s2 { fill: #51cf66; background: #51cf66; }
+  .chart-line.chart-s3 { stroke: #cc5de8; } .chart-dot.chart-s3, .chart-swatch.chart-s3 { fill: #cc5de8; background: #cc5de8; }
+}
