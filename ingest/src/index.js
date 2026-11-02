@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { parseMessage } from './parse.js';
 import { IngestBuffer } from './buffer.js';
 import { writeBatch } from './write.js';
+import { Journal } from './journal.js';
 
 const env = process.env;
 for (const k of ['DATABASE_URL', 'MQTT_PASSWORD']) {
@@ -17,6 +18,11 @@ const db = new pg.Pool({ connectionString: env.DATABASE_URL, max: 4 });
 db.on('error', (e) => console.error('pg pool error', e.message));
 
 const buffer = new IngestBuffer();
+// журнал на томе: сообщения, подтверждённые брокеру, но ещё не записанные в БД, переживают падение процесса
+const journal = new Journal(env.JOURNAL_DIR === '' ? null : (env.JOURNAL_DIR || '/journal'));
+const recovered = journal.replay();
+for (const { ev, time } of recovered) buffer.add(ev, time);
+if (recovered.length) console.log(`journal: восстановлено ${recovered.length} событий с прошлого запуска`);
 let flushing = false;
 let written = 0;
 let rejected = 0;
@@ -25,6 +31,7 @@ async function flush() {
   if (flushing || buffer.size === 0) return;
   flushing = true;
   const batch = buffer.take();
+  const seq = journal.rotate(); // файл журнала = ровно эта пачка (take и rotate идут подряд, без await)
   const client = await db.connect().catch((e) => {
     console.error('db connect failed', e.message);
     return null;
@@ -35,6 +42,7 @@ async function flush() {
     const res = await writeBatch(client, batch);
     written += res.written;
     rejected += res.dropped.length;
+    journal.commit(seq);
   } catch (e) {
     console.error(`flush failed (${batch.rows.length} rows requeued):`, e.message);
     buffer.restore(batch);
@@ -68,10 +76,17 @@ client.on('connect', async () => {
 });
 client.on('error', (e) => console.error('mqtt error', e.message));
 
+// Обработчик синхронный: событие попадает в журнал до того, как mqtt.js отправит PUBACK
 client.on('message', (topic, payload) => {
   const ev = parseMessage(topic, payload);
   if (!ev) return;
-  buffer.add(ev);
+  const now = new Date();
+  try {
+    journal.append(ev, now);
+  } catch (e) {
+    console.error('journal append failed', e.message);
+  }
+  buffer.add(ev, now);
   if (buffer.rows.length >= BATCH_MAX) flush();
 });
 

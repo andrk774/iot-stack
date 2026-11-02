@@ -129,7 +129,10 @@ services:
       MQTT_PASSWORD: ${MQTT_INGEST_PASSWORD}
       FLUSH_MS: ${INGEST_FLUSH_MS:-1000}
       BATCH_MAX: ${INGEST_BATCH_MAX:-1000}
+      JOURNAL_DIR: /journal
       TZ: ${TZ:-UTC}
+    volumes:
+      - ingest-journal:/journal
     depends_on:
       postgres:
         condition: service_healthy
@@ -289,5 +292,6 @@ networks:
 
 volumes:
   pgdata:
+  ingest-journal:
   emqx-data:
   emqx-log:
