@@ -1,8 +1,9 @@
 # IoT Stack — самохостинговая платформа по принципам 2Smart
 
-Платформа для своих устройств на одном VPS: веб-панель, привязка устройств, MQTT с TLS и ACL,
-история показаний, сценарии автоматизации, мосты для Zigbee/ESPHome/любого MQTT, бэкапы,
-SDK для ESP32, ESP8266, Node.js и Python.
+Платформа для своих устройств на одном VPS: веб-панель (ставится на телефон как приложение), привязка устройств,
+MQTT с TLS и ACL, история показаний за 2 года, сценарии автоматизации, уведомления в Telegram, вебхуки и push,
+обновление прошивок по воздуху, общий доступ для семьи, Алиса, мосты для Zigbee/ESPHome/Tasmota/Shelly/любого MQTT,
+двухфакторный вход, бэкапы, SDK для ESP32, ESP8266, Node.js и Python.
 
 ```
 ESP32/ESP8266/Pi ──mqtts:8883──┐                       ┌── auth/ACL (HTTP) ── backend :8001
@@ -18,12 +19,12 @@ ESP32/ESP8266/Pi ──mqtts:8883──┐                       ┌── auth/
 |---|---|---|
 | `emqx` | `2smart-emqx` | MQTT-брокер. Логин и ACL спрашивает у бэкенда по HTTP |
 | `postgres` | `2smart-mysql` + `influxdb` | Пользователи, устройства, мосты, сценарии, уведомления; телеметрия в hypertable (сжатие через 7 дней, удаление через 90) |
-| `backend` | `client-dashboard-be` | REST API, JWT, привязка устройств, команды, мосты, сценарии, хуки EMQX, миграции БД |
-| `ingest` | `time-series-service` | Пишет значения в БД пачками раз в секунду, отслеживает состояние мостов |
+| `backend` | `client-dashboard-be` | REST API, сеансы и 2FA, привязка устройств, команды, OTA, мосты, сценарии, общий доступ, рассылка уведомлений, Алиса, хуки EMQX, миграции БД |
+| `ingest` | `time-series-service` | Пишет значения в БД пачками раз в секунду через журнал на диске, отслеживает состояние мостов |
 | `scenarios` | `scenario-runner` | Правила «если — то», расписания, уведомления |
 | `nginx` | `2smart-nginx` | Панель, HTTPS, CSP, rate limit, TLS для MQTT (8883), WebSocket `/mqtt` |
-| `web/public` | `2smart-ui` | Веб-панель без сборки: устройства, живые данные, графики, сценарии, мосты |
-| `bridge-*` | мосты `zigbee`, `esphome`, `mqtt-adapter` | zigbee2mqtt, ESPHome/Tasmota (MQTT discovery), произвольный MQTT по правилам |
+| `web/public` | `2smart-ui` | Веб-панель и PWA без сборки: главная, комнаты, живые данные, графики, сценарии, мосты, настройки |
+| `bridge-*` | мосты `zigbee`, `esphome`, `mqtt-adapter` | zigbee2mqtt, ESPHome (MQTT discovery), Tasmota, Shelly, произвольный MQTT по правилам |
 | `backup` | `backup-service` | Ежедневный `pg_dump`, ротация, выгрузка в S3-совместимое хранилище |
 | `certbot` | `certbot-bridge` | Сертификат Let's Encrypt и его продление |
 

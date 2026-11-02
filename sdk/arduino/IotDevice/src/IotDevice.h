@@ -20,7 +20,7 @@
 #include "IotProtocol.h"
 #include "IotStorage.h"
 
-#define IOT_DEVICE_SDK_VERSION "0.2.0"
+#define IOT_DEVICE_SDK_VERSION "0.3.0"
 
 class IotDevice;
 
