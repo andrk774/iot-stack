@@ -71,6 +71,10 @@ services:
       TELEGRAM_API_URL: ${TELEGRAM_API_URL:-https://api.telegram.org}
       FIRMWARE_MAX_MB: ${FIRMWARE_MAX_MB:-4}
       WEBPUSH_SUBJECT: ${WEBPUSH_SUBJECT:-}
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:-}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:-}
+      YANDEX_SKILL_ID: ${YANDEX_SKILL_ID:-}
+      YANDEX_SKILL_TOKEN: ${YANDEX_SKILL_TOKEN:-}
       TZ: ${TZ:-UTC}
     depends_on:
       postgres:

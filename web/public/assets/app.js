@@ -10,6 +10,7 @@ import { renderBridges } from './views/bridges.js';
 import { renderNotifications } from './views/notifications.js';
 import { renderSettings } from './views/settings.js';
 import { renderHome } from './views/home.js';
+import { renderOauth } from './views/alice.js';
 import { acceptPendingInvite } from './views/members.js';
 
 const app = document.getElementById('app');
@@ -18,6 +19,7 @@ let shell = null;
 
 const ROUTES = [
   [/^#\/home$/, () => [renderHome, {}], 'home'],
+  [/^#\/oauth\?/, () => [renderOauth, {}], 'settings'],
   [/^#\/devices\/([^/]+)$/, (m) => [renderDevice, { id: m[1] }], 'devices'],
   [/^#\/devices$/, () => [renderDevices, {}], 'devices'],
   [/^#\/scenarios\/([^/]+)$/, (m) => [renderScenarioEditor, { id: m[1] }], 'scenarios'],

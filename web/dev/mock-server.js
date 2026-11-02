@@ -215,6 +215,8 @@ async function api(req, res, url) {
   }
   if (p === '/api/dashboard' && req.method === 'GET') return json(res, 200, { items: dashboard });
   if (p === '/api/dashboard' && req.method === 'PUT') { dashboard = body.items; return json(res, 200, { items: dashboard }); }
+  if (p === '/api/oauth/links' && req.method === 'GET') return json(res, 200, { links: [{ client_id: 'iot-home', created_at: ago(86400 * 3), last_used_at: ago(120) }], yandex: { enabled: true } });
+  if (p === '/api/oauth/authorize') return json(res, 200, { redirect: `http://${req.headers.host}/#/home` });
   if (p === '/api/homes') return json(res, 200, { homes: [{ owner_id: USER.id, owner_email: USER.email, role: 'owner' }, { owner_id: 'parent-home', owner_email: 'mama@example.com', role: 'control' }] });
   if (p === '/api/members' && req.method === 'GET') return json(res, 200, { members: [{ user_id: 'u-son', email: 'son@example.com', role: 'control', created_at: ago(86400 * 30) }, { user_id: 'u-wife', email: 'wife@example.com', role: 'admin', created_at: ago(86400 * 90) }], invites: [{ id: 'i1', role: 'view', created_at: ago(3600), expires_at: new Date(Date.now() + 6 * 86400e3).toISOString() }] });
   if ((x = m(/^\/api\/members\/([\w-]+)$/))) return json(res, req.method === 'DELETE' ? 204 : 200, { user_id: x[1], role: body?.role });
