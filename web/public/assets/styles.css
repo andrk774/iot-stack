@@ -84,6 +84,8 @@ code, pre { font-family: var(--mono); font-size: 0.875em; }
 }
 .topbar-end { display: flex; align-items: center; gap: 14px; }
 .who { color: var(--muted); font-size: 0.875rem; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1240px) { .who { display: none; } }
+.nav { scrollbar-width: none; }
 .live { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8125rem; color: var(--muted); }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .live[data-status="online"] .live-dot { background: var(--ok); }
@@ -303,3 +305,18 @@ progress { width: 160px; height: 8px; accent-color: var(--accent); }
 .group-title:first-child { border-top: 0; border-radius: var(--radius-m) var(--radius-m) 0 0; }
 .role-note { font-size: 0.875rem; color: var(--muted); }
 .invite-note { margin: 0; padding: 10px 12px; border-radius: var(--radius-s); background: var(--accent-soft); color: var(--ink); font-size: 0.9375rem; }
+.tile-head { display: flex; justify-content: space-between; align-items: start; gap: 8px; }
+.tile-device { color: var(--ink); font-weight: 600; text-decoration: none; }
+.tile-device:hover { text-decoration: underline; }
+.star { border: 0; background: none; padding: 0 2px; font-size: 1.125rem; line-height: 1; color: var(--muted); cursor: pointer; }
+.star.is-on { color: var(--warn); }
+.star:hover { color: var(--accent); }
+.summary { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline; margin: -8px 0 18px; color: var(--muted); }
+.summary-item strong { color: var(--ink); font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+.summary-item.is-bad strong { color: var(--bad); }
+.summary-link { font-size: 0.9375rem; }
+.tile.is-editing { outline: 1px dashed var(--line); outline-offset: -6px; }
+.tile-edit { display: flex; gap: 6px; margin-top: 8px; }
+.tile-add { border: 0; background: var(--sunken); color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; place-content: center; }
+.room-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); align-items: center; }
+.room-row:first-child { border-top: 0; }

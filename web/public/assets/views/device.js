@@ -62,11 +62,33 @@ function control(device, p, current) {
   return h('div', { class: 'inline-form' }, input, send);
 }
 
-function tile(device, p) {
+/** Звёздочка «на главную» для свойства */
+function starButton(device, p) {
+  const on = store.onDashboard(device.id, p.name);
+  const b = h('button', {
+    class: `star${on ? ' is-on' : ''}`, type: 'button', 'aria-pressed': String(on),
+    title: on ? 'Убрать с главной' : 'На главную', 'aria-label': `${p.name}: ${on ? 'убрать с главной' : 'на главную'}`,
+  }, on ? '★' : '☆');
+  b.addEventListener('click', async (e) => {
+    e.preventDefault();
+    b.disabled = true;
+    try { await store.toggleDashboard(device.id, p.name); } catch (err) { toast(errorMessage(err), 'error'); }
+    b.disabled = false;
+  });
+  return b;
+}
+
+/** Плитка свойства. withDevice — для главной: над свойством имя устройства со ссылкой */
+export function tile(device, p, { withDevice = false } = {}) {
   const v = coerce(device.last_values?.[p.name], p.type);
   const fresh = Date.now() - (store.flash.get(`${device.id}/${p.name}`) || 0) < 1500;
-  return h('section', { class: `tile${p.settable ? ' tile-control' : ''}${fresh ? ' is-fresh' : ''}`, dataset: { prop: p.name } },
-    h('h3', { class: 'tile-name' }, p.name),
+  return h('section', { class: `tile${p.settable && can(device, 'control') ? ' tile-control' : ''}${fresh ? ' is-fresh' : ''}`, dataset: { prop: p.name, device: device.id } },
+    h('div', { class: 'tile-head' },
+      h('h3', { class: 'tile-name' },
+        withDevice ? h('a', { class: 'tile-device', href: `#/devices/${device.id}` }, device.name) : null,
+        withDevice ? h('br') : null,
+        p.name),
+      starButton(device, p)),
     h('div', { class: 'tile-value' },
       formatValue(v, p.type),
       p.unit && v !== null ? h('span', { class: 'readout-unit' }, p.unit) : null),
@@ -182,6 +204,29 @@ export function renderDevice(root, { id }) {
     } catch (e) { toast(errorMessage(e), 'error'); }
   };
 
+  // комната: администратор выбирает, остальные видят
+  const factsHost = h('div');
+  const drawFacts = () => {
+    const rooms = store.rooms.filter((r) => r.owner_id === device.owner_id || !device.owner_id);
+    if (!can(device, 'admin')) {
+      mount(factsHost, device.room_id ? h('p', null, `Комната: ${store.roomName(device.room_id) || '—'}`) : null);
+      return;
+    }
+    const sel = h('select', { 'aria-label': 'Комната' }, h('option', { value: '' }, 'без комнаты'),
+      ...rooms.map((r) => h('option', { value: r.id }, r.name)));
+    sel.value = device.room_id || '';
+    sel.addEventListener('change', async () => {
+      try {
+        const d = await put(`/api/devices/${device.id}`, { room_id: sel.value || null });
+        store.upsert(d);
+        toast('Комната сохранена');
+      } catch (e) { toast(errorMessage(e), 'error'); sel.value = device.room_id || ''; }
+    });
+    mount(factsHost, h('div', { class: 'inline-form', style: { marginTop: 0, marginBottom: '12px', alignItems: 'center' } },
+      h('span', null, 'Комната'), sel,
+      rooms.length ? null : h('a', { href: '#/devices', class: 'muted' }, 'комнаты создаются на странице «Устройства»')));
+  };
+
   const chartHost = h('div');
   const drawChart = () => mount(chartHost, chartPanel(device));
   // OTA — только для устройств со своей прошивкой на нашем SDK (не через мост)
@@ -190,6 +235,7 @@ export function renderDevice(root, { id }) {
   mount(root, head, tiles, chartHost, ota?.el,
     h('section', { class: 'panel panel-quiet' },
       h('h2', null, 'Обслуживание'),
+      factsHost,
       h('dl', { class: 'facts' },
         h('dt', null, 'ID'), h('dd', null, h('code', null, device.id), ' ',
           h('button', { class: 'btn btn-small', type: 'button', onclick: () => copyText(device.id) }, 'Копировать')),
@@ -202,15 +248,17 @@ export function renderDevice(root, { id }) {
   drawHead();
   drawTiles();
   drawChart();
+  drawFacts();
 
   const unsub = store.subscribe((ev, p) => {
+    if (ev === 'dashboard') { drawTiles(); return; }
     if ((ev === 'device' && p.id === id) || ev === 'devices') {
       device = store.devices.get(id);
       if (!device) return;
       if (p?.ota) { ota?.live(p.ota); return; }
       drawHead();
       if (p?.meta) ota?.setDevice(device);
-      if (p?.meta || ev === 'devices') { drawTiles(); drawChart(); return; }
+      if (p?.meta || ev === 'devices') { drawTiles(); drawChart(); drawFacts(); return; }
       if (p?.prop) {
         const old = tiles.querySelector(`[data-prop="${CSS.escape(p.prop)}"]`);
         const spec = deviceProps(device).find((x) => x.name === p.prop);

@@ -9,6 +9,7 @@ import { renderScenarios, renderScenarioEditor } from './views/scenarios.js';
 import { renderBridges } from './views/bridges.js';
 import { renderNotifications } from './views/notifications.js';
 import { renderSettings } from './views/settings.js';
+import { renderHome } from './views/home.js';
 import { acceptPendingInvite } from './views/members.js';
 
 const app = document.getElementById('app');
@@ -16,6 +17,7 @@ let cleanup = () => {};
 let shell = null;
 
 const ROUTES = [
+  [/^#\/home$/, () => [renderHome, {}], 'home'],
   [/^#\/devices\/([^/]+)$/, (m) => [renderDevice, { id: m[1] }], 'devices'],
   [/^#\/devices$/, () => [renderDevices, {}], 'devices'],
   [/^#\/scenarios\/([^/]+)$/, (m) => [renderScenarioEditor, { id: m[1] }], 'scenarios'],
@@ -26,6 +28,7 @@ const ROUTES = [
 ];
 
 const NAV = [
+  ['home', '#/home', 'Главная'],
   ['devices', '#/devices', 'Устройства'],
   ['scenarios', '#/scenarios', 'Сценарии'],
   ['bridges', '#/bridges', 'Мосты'],
@@ -47,7 +50,7 @@ function buildShell() {
   const live = h('span', { class: 'live', title: 'Живые данные по MQTT' }, h('span', { class: 'live-dot' }), h('span', { class: 'live-text' }));
   const main = h('main', { class: 'content', id: 'main', tabindex: '-1' });
   const header = h('header', { class: 'topbar' },
-    h('a', { class: 'brand', href: '#/devices' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), 'Домашний IoT'),
+    h('a', { class: 'brand', href: '#/home' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), 'Домашний IoT'),
     nav,
     h('div', { class: 'topbar-end' },
       live,
@@ -76,18 +79,20 @@ async function refreshBadge() {
 
 function route() {
   if (!getToken()) return;
-  if (!location.hash || location.hash === '#' || location.hash === '#/') { location.hash = '#/devices'; return; }
+  if (!location.hash || location.hash === '#' || location.hash === '#/') { location.hash = '#/home'; return; }
   let found = null;
   for (const [re, make, key] of ROUTES) {
     const m = re.exec(location.hash);
     if (m) { found = [...make(m), key]; break; }
   }
-  if (!found) { location.hash = '#/devices'; return; }
+  if (!found) { location.hash = '#/home'; return; }
   const [view, params, key] = found;
   for (const a of shell.nav.querySelectorAll('a')) {
     if (a.dataset.key === key) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
+  // окна прошлой страницы не должны оставаться поверх новой
+  for (const d of document.querySelectorAll('dialog[open]')) d.close();
   cleanup();
   cleanup = view(shell.main, params, { refreshBadge }) || (() => {});
   window.scrollTo(0, 0);
@@ -100,7 +105,7 @@ function takeInviteFromUrl() {
   const m = /^#\/join\/([A-Za-z0-9_-]{32})$/.exec(location.hash);
   if (!m) return;
   try { sessionStorage.setItem(INVITE_KEY, m[1]); } catch { /* приватный режим */ }
-  history.replaceState(null, '', `${location.pathname}#/devices`);
+  history.replaceState(null, '', `${location.pathname}#/home`);
 }
 function pendingInvite() {
   try { return sessionStorage.getItem(INVITE_KEY); } catch { return null; }

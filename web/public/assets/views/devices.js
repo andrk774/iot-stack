@@ -1,5 +1,5 @@
 import { h, mount, modal, field, copyText, toast } from '../dom.js';
-import { post } from '../api.js';
+import { post, put, del } from '../api.js';
 import { store } from '../store.js';
 import { homeLabel, homeSelect, sharedMode, ROLE_LABELS } from '../access.js';
 import {
@@ -66,6 +66,49 @@ function addDeviceDialog() {
   setTimeout(() => name.focus(), 0);
 }
 
+/** Комнаты: список, добавить, переименовать, порядок, удалить (только дома, где вы администратор) */
+function roomsDialog() {
+  const body = h('div', { class: 'stack' });
+  const home = homeSelect('admin');
+  const homeId = () => home?.value || store.me.id;
+  const draw = () => {
+    const rooms = store.rooms.filter((r) => r.owner_id === homeId());
+    const name = h('input', { maxlength: 40, placeholder: 'Например, «Кухня»' });
+    const add = async () => {
+      if (!name.value.trim()) return;
+      try { await post('/api/rooms', { name: name.value.trim(), ...(home ? { home: home.value } : {}) }); await store.loadRooms(); draw(); } catch (e) { toast(errorMessage(e), 'error'); }
+    };
+    name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+    mount(body,
+      home ? field('Дом', home) : null,
+      rooms.length ? h('div', { class: 'list' }, ...rooms.map((r, i) => {
+        const input = h('input', { value: r.name, maxlength: 40, 'aria-label': 'Название комнаты' });
+        input.addEventListener('change', async () => {
+          try { await put(`/api/rooms/${r.id}`, { name: input.value.trim() }); await store.loadRooms(); } catch (e) { toast(errorMessage(e), 'error'); input.value = r.name; }
+        });
+        const swap = async (j) => {
+          const other = rooms[j];
+          try {
+            await put(`/api/rooms/${r.id}`, { sort: j });
+            await put(`/api/rooms/${other.id}`, { sort: i });
+            await store.loadRooms(); draw();
+          } catch (e) { toast(errorMessage(e), 'error'); }
+        };
+        return h('div', { class: 'room-row' }, input,
+          h('button', { class: 'btn btn-small', type: 'button', disabled: i === 0, 'aria-label': 'Выше', onclick: () => swap(i - 1) }, '↑'),
+          h('button', { class: 'btn btn-small', type: 'button', disabled: i === rooms.length - 1, 'aria-label': 'Ниже', onclick: () => swap(i + 1) }, '↓'),
+          h('button', { class: 'btn btn-small btn-danger', type: 'button', onclick: async () => {
+            if (!confirm(`Удалить комнату «${r.name}»? Устройства останутся, но без комнаты.`)) return;
+            try { await del(`/api/rooms/${r.id}`); await store.loadRooms(); await store.loadDevices(); draw(); } catch (e) { toast(errorMessage(e), 'error'); }
+          } }, 'Удалить'));
+      })) : h('p', { class: 'muted' }, 'Комнат пока нет. Устройство попадает в комнату на своей странице, в блоке «Обслуживание».'),
+      h('div', { class: 'inline-form' }, name, h('button', { class: 'btn btn-primary', type: 'button', onclick: add }, 'Добавить комнату')));
+  };
+  home?.addEventListener('change', draw);
+  draw();
+  modal('Комнаты', body);
+}
+
 export function renderDevices(root) {
   const list = h('div', { class: 'device-list' });
   const draw = () => {
@@ -77,18 +120,31 @@ export function renderDevices(root) {
         h('button', { class: 'btn btn-primary', type: 'button', onclick: addDeviceDialog }, 'Добавить устройство')));
       return;
     }
-    if (!sharedMode()) { mount(list, ...devices.map(row)); return; }
-    // доступ к нескольким домам: группы по дому, свой — первым
-    const order = store.homes.map((x) => x.owner_id);
-    const groups = new Map(order.map((o) => [o, []]));
-    for (const d of devices) (groups.get(d.owner_id) || groups.set(d.owner_id, []).get(d.owner_id)).push(d);
+    // группы: дом (если их несколько) → комнаты по порядку → «без комнаты»
+    const shared = sharedMode();
+    const homeOrder = shared ? store.homes.map((x) => x.owner_id) : [null];
     const parts = [];
-    for (const [owner, ds] of groups) {
-      if (!ds.length) continue;
+    for (const owner of homeOrder) {
+      const inHome = shared ? devices.filter((d) => d.owner_id === owner) : devices;
+      if (!inHome.length) continue;
       const role = store.homes.find((x) => x.owner_id === owner)?.role;
-      parts.push(h('h2', { class: 'group-title' }, homeLabel(owner),
-        role && role !== 'owner' ? h('span', { class: 'muted' }, ` · ${ROLE_LABELS[role]}`) : null));
-      parts.push(...ds.map(row));
+      const rooms = store.rooms.filter((r) => !shared || r.owner_id === owner);
+      const byRoom = rooms.map((r) => [r.name, inHome.filter((d) => d.room_id === r.id)]).filter(([, ds]) => ds.length);
+      const loose = inHome.filter((d) => !d.room_id || !rooms.some((r) => r.id === d.room_id));
+      const prefix = shared ? `${homeLabel(owner)}${role && role !== 'owner' ? ` (${ROLE_LABELS[role]})` : ''}` : '';
+      if (!byRoom.length) {
+        if (shared) parts.push(h('h2', { class: 'group-title' }, prefix));
+        parts.push(...loose.map(row));
+        continue;
+      }
+      for (const [room, ds] of byRoom) {
+        parts.push(h('h2', { class: 'group-title' }, prefix ? `${prefix} · ${room}` : room));
+        parts.push(...ds.map(row));
+      }
+      if (loose.length) {
+        parts.push(h('h2', { class: 'group-title' }, prefix ? `${prefix} · без комнаты` : 'Без комнаты'));
+        parts.push(...loose.map(row));
+      }
     }
     mount(list, ...parts);
   };
@@ -96,12 +152,14 @@ export function renderDevices(root) {
   mount(root,
     h('header', { class: 'page-head' },
       h('h1', null, 'Устройства'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: addDeviceDialog }, 'Добавить устройство')),
+      h('div', { class: 'panel-tools' },
+        store.homes.some((x) => x.role === 'owner' || x.role === 'admin') ? h('button', { class: 'btn', type: 'button', onclick: roomsDialog }, 'Комнаты') : null,
+        h('button', { class: 'btn btn-primary', type: 'button', onclick: addDeviceDialog }, 'Добавить устройство'))),
     list);
   draw();
 
   const unsub = store.subscribe((ev, p) => {
-    if (ev === 'devices') draw();
+    if (ev === 'devices' || ev === 'rooms') draw();
     if (ev === 'device') {
       const old = list.querySelector(`[data-id="${p.id}"]`);
       const d = store.devices.get(p.id);

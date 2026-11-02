@@ -8,7 +8,7 @@ const BUCKET_RE = /^(\d{1,4})(s|m|h|d)$/;
 const BUCKET_UNITS = { s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
 const MAX_RANGE_MS = 92 * 24 * 3600 * 1000;
 
-export const DEVICE_COLUMNS = `id, owner_id, name, state, meta, last_values, last_seen, created_at, provisioned_at, bridge_id,
+export const DEVICE_COLUMNS = `id, owner_id, room_id, name, state, meta, last_values, last_seen, created_at, provisioned_at, bridge_id,
   (mqtt_password_hash IS NOT NULL OR bridge_id IS NOT NULL) AS provisioned`;
 
 const NO_EMQX = { kick: async () => false };
@@ -74,9 +74,19 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   r.put('/api/devices/:id', async ({ req, params, body }) => {
     const userId = await auth(req);
     const d = await loadDevice(userId, params.id, 'admin');
-    const name = str(body.name, 'name', { max: 64 });
+    const name = body.name === undefined ? d.name : str(body.name, 'name', { max: 64 });
+    // комната: null — без комнаты; иначе комната того же дома
+    let roomId = d.room_id;
+    if (body.room_id !== undefined) {
+      roomId = body.room_id;
+      if (roomId !== null) {
+        if (typeof roomId !== 'string' || !/^[0-9a-f-]{36}$/.test(roomId)) throw new HttpError(400, 'validation', { field: 'room_id', reason: 'uuid или null' });
+        const { rows: rr } = await db.query('SELECT 1 FROM rooms WHERE id = $1 AND owner_id = $2', [roomId, d.owner_id]);
+        if (!rr[0]) throw new HttpError(400, 'validation', { field: 'room_id', reason: 'комната другого дома или не существует' });
+      }
+    }
     const { rows } = await db.query(
-      `UPDATE devices SET name = $2 WHERE id = $1 RETURNING ${DEVICE_COLUMNS}`, [params.id, name],
+      `UPDATE devices SET name = $2, room_id = $3 WHERE id = $1 RETURNING ${DEVICE_COLUMNS}`, [params.id, name, roomId],
     );
     return { ...rows[0], my_role: d.my_role };
   });
