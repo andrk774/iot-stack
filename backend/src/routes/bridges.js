@@ -6,7 +6,7 @@ import { hashSecret, verifySecret, randomToken, newDeviceId } from '../security.
 import { DEVICE_COLUMNS } from './public.js';
 import crypto from 'node:crypto';
 
-export const BRIDGE_TYPES = ['zigbee2mqtt', 'esphome', 'generic'];
+export const BRIDGE_TYPES = ['zigbee2mqtt', 'esphome', 'generic', 'tasmota', 'shelly'];
 const COLUMNS = `b.id, b.owner_id, b.name, b.type, b.config, b.state, b.last_seen, b.created_at,
   (SELECT count(*)::int FROM devices d WHERE d.bridge_id = b.id) AS device_count`;
 const TOPIC_RE = /^[^#+\s][^#+\s]{0,199}$/;
@@ -31,6 +31,24 @@ export function validateBridgeConfig(type, config = {}) {
     const prefix = config.discovery_prefix ?? 'homeassistant';
     if (typeof prefix !== 'string' || !TOPIC_RE.test(prefix)) bad('discovery_prefix', 'топик без + и #');
     return { discovery_prefix: prefix };
+  }
+  if (type === 'tasmota') {
+    // discovery Tasmota (SetOption19 0, по умолчанию с 9.x) и/или явный список топиков устройств
+    const prefix = config.discovery_prefix ?? 'tasmota/discovery';
+    if (typeof prefix !== 'string' || !TOPIC_RE.test(prefix)) bad('discovery_prefix', 'топик без + и #');
+    const topics = config.topics ?? [];
+    if (!Array.isArray(topics) || topics.length > 100 || !topics.every((t) => typeof t === 'string' && /^[\w\-.]{1,64}$/.test(t))) {
+      bad('topics', 'до 100 топиков устройств (буквы, цифры, _ - .)');
+    }
+    return { discovery_prefix: prefix, topics: [...new Set(topics)] };
+  }
+  if (type === 'shelly') {
+    // Gen2/Gen3 (RPC: <id>/status/..., <id>/events/rpc) и Gen1 (shellies/<id>/...): по умолчанию все, чей топик начинается с shelly
+    const prefixes = config.prefixes ?? [];
+    if (!Array.isArray(prefixes) || prefixes.length > 100 || !prefixes.every((t) => typeof t === 'string' && /^[\w\-.]{1,64}$/.test(t))) {
+      bad('prefixes', 'до 100 топиков устройств');
+    }
+    return { prefixes: [...new Set(prefixes)], gen1: config.gen1 !== false };
   }
   // generic: явные правила
   const maps = config.mappings;
@@ -170,6 +188,9 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
     const b = await bridgeAuth(req);
     const key = str(body.key, 'key', { max: 100, re: KEY_RE });
     const name = str(body.name ?? key, 'name', { max: 64 });
+    // пользователь удалил это устройство — мост не должен возвращать его обратно
+    const { rows: ignored } = await db.query('SELECT 1 FROM bridge_ignored WHERE bridge_id = $1 AND key = $2', [b.id, key]);
+    if (ignored[0]) throw new HttpError(409, 'device_ignored');
     const { rows: existing } = await db.query(
       `SELECT ${DEVICE_COLUMNS} FROM devices WHERE bridge_id = $1 AND bridge_key = $2`, [b.id, key],
     );
@@ -188,6 +209,20 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
       return rows[0];
     });
     return reply(201, device);
+  });
+
+  // скрытые (удалённые пользователем) устройства моста: посмотреть и вернуть
+  r.get('/api/bridges/:id/ignored', async ({ req, params }) => {
+    const b = await own(await auth(req), params.id);
+    const { rows } = await db.query('SELECT key, name, created_at FROM bridge_ignored WHERE bridge_id = $1 ORDER BY name', [b.id]);
+    return { ignored: rows };
+  });
+
+  r.delete('/api/bridges/:id/ignored/:key', async ({ req, params }) => {
+    const b = await own(await auth(req), params.id);
+    const { rowCount } = await db.query('DELETE FROM bridge_ignored WHERE bridge_id = $1 AND key = $2', [b.id, params.key]);
+    if (!rowCount) throw new HttpError(404, 'not_found');
+    return reply(204);
   });
 
   r.get('/api/bridge/devices', async ({ req }) => {

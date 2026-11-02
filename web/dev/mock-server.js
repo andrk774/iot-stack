@@ -266,6 +266,8 @@ async function api(req, res, url) {
     bridges.set(b.id, b);
     return json(res, 201, { bridge: b, token: crypto.randomBytes(24).toString('base64url') });
   }
+  if ((x = m(/^\/api\/bridges\/(\w+)\/ignored$/))) return json(res, 200, { ignored: [{ key: '0x00158d0001a2b3c4', name: 'Старый датчик', created_at: ago(86400) }] });
+  if ((x = m(/^\/api\/bridges\/(\w+)\/ignored\/(.+)$/))) return json(res, 204);
   if ((x = m(/^\/api\/bridges\/(\w+)\/token$/))) return json(res, 200, { token: crypto.randomBytes(24).toString('base64url') });
   if ((x = m(/^\/api\/bridges\/(\w+)$/))) {
     const b = bridges.get(x[1]);

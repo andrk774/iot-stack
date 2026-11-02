@@ -1,6 +1,6 @@
 # IoT-платформа по мотивам 2Smart Standalone.
 # Ядро: EMQX (шина) + PostgreSQL/TimescaleDB + backend + ingest + scenarios + nginx (+ certbot, backup).
-# Мосты включаются профилями: docker compose --profile zigbee|esphome|generic up -d
+# Мосты включаются профилями: docker compose --profile zigbee|esphome|tasmota|shelly|generic up -d
 name: iot
 
 x-logging: &logging
@@ -251,6 +251,32 @@ services:
       EXTERNAL_MQTT_URL: ${GENERIC_MQTT_URL:-mqtt://host.docker.internal:1883}
       EXTERNAL_MQTT_USERNAME: ${GENERIC_MQTT_USERNAME:-}
       EXTERNAL_MQTT_PASSWORD: ${GENERIC_MQTT_PASSWORD:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  bridge-tasmota:
+    <<: *bridge
+    profiles: [tasmota]
+    environment:
+      API_URL: http://backend:8000
+      MQTT_URL: mqtt://emqx:1883
+      BRIDGE_ID: ${TASMOTA_BRIDGE_ID:-}
+      BRIDGE_TOKEN: ${TASMOTA_BRIDGE_TOKEN:-}
+      EXTERNAL_MQTT_URL: ${TASMOTA_MQTT_URL:-mqtt://host.docker.internal:1883}
+      EXTERNAL_MQTT_USERNAME: ${TASMOTA_MQTT_USERNAME:-}
+      EXTERNAL_MQTT_PASSWORD: ${TASMOTA_MQTT_PASSWORD:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  bridge-shelly:
+    <<: *bridge
+    profiles: [shelly]
+    environment:
+      API_URL: http://backend:8000
+      MQTT_URL: mqtt://emqx:1883
+      BRIDGE_ID: ${SHELLY_BRIDGE_ID:-}
+      BRIDGE_TOKEN: ${SHELLY_BRIDGE_TOKEN:-}
+      EXTERNAL_MQTT_URL: ${SHELLY_MQTT_URL:-mqtt://host.docker.internal:1883}
+      EXTERNAL_MQTT_USERNAME: ${SHELLY_MQTT_USERNAME:-}
+      EXTERNAL_MQTT_PASSWORD: ${SHELLY_MQTT_PASSWORD:-}
     extra_hosts: ["host.docker.internal:host-gateway"]
 
 networks:

@@ -175,6 +175,13 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
     const userId = await auth(req);
     const device = await loadDevice(userId, params.id, 'admin');
     await withTx(db, async (tx) => {
+      if (device.bridge_id) {
+        // устройство моста: запоминаем ключ, иначе мост зарегистрирует его снова
+        await tx.query(
+          `INSERT INTO bridge_ignored (bridge_id, key, name)
+           SELECT bridge_id, bridge_key, name FROM devices WHERE id = $1 AND bridge_key IS NOT NULL
+           ON CONFLICT DO NOTHING`, [device.id]);
+      }
       await tx.query('DELETE FROM devices WHERE id = $1', [device.id]);
       await tx.query('DELETE FROM telemetry WHERE device_id = $1', [device.id]);
     });

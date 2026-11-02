@@ -609,3 +609,28 @@ test('rooms and dashboard on real SQL', { skip }, async () => {
   await call(apiUrl, 'DELETE', `/api/members/${V.id}`, null, A.auth);
   assert.deepEqual((await call(apiUrl, 'GET', '/api/dashboard', null, V.auth)).body.items, []);
 });
+
+test('bridge devices deleted by user stay hidden; tasmota/shelly configs', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'ign@x.ru', password: 'password123' });
+  const auth = `Bearer ${reg.body.token}`;
+  const br = await call(apiUrl, 'POST', '/api/bridges', { name: 'T', type: 'tasmota', config: { topics: ['hall', 'hall'] } }, auth);
+  assert.equal(br.status, 201);
+  assert.deepEqual(br.body.bridge.config, { discovery_prefix: 'tasmota/discovery', topics: ['hall'] });
+  assert.equal((await call(apiUrl, 'POST', '/api/bridges', { name: 'T', type: 'tasmota', config: { topics: ['a/b'] } }, auth)).status, 400);
+  const sh = await call(apiUrl, 'POST', '/api/bridges', { name: 'S', type: 'shelly', config: {} }, auth);
+  assert.deepEqual(sh.body.bridge.config, { prefixes: [], gen1: true });
+  const bauth = `Bridge ${br.body.bridge.id}:${br.body.token}`;
+  const d = await call(apiUrl, 'POST', '/api/bridge/devices', { key: 'a4cf12aabbcc', name: 'Розетка' }, bauth);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/devices/${d.body.id}`, null, auth)).status, 204);
+  const again = await call(apiUrl, 'POST', '/api/bridge/devices', { key: 'a4cf12aabbcc', name: 'Розетка' }, bauth);
+  assert.deepEqual([again.status, again.body.error], [409, 'device_ignored']);
+  const ign = await call(apiUrl, 'GET', `/api/bridges/${br.body.bridge.id}/ignored`, null, auth);
+  assert.deepEqual(ign.body.ignored.map((x) => [x.key, x.name]), [['a4cf12aabbcc', 'Розетка']]);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/bridges/${br.body.bridge.id}/ignored/a4cf12aabbcc`, null, auth)).status, 204);
+  assert.equal((await call(apiUrl, 'POST', '/api/bridge/devices', { key: 'a4cf12aabbcc', name: 'Розетка' }, bauth)).status, 201);
+  // обычное устройство в «скрытые» не попадает
+  const plain = (await call(apiUrl, 'POST', '/api/devices', { name: 'x' }, auth)).body.device;
+  await call(apiUrl, 'DELETE', `/api/devices/${plain.id}`, null, auth);
+  const { rows } = await db.query('SELECT count(*)::int AS n FROM bridge_ignored');
+  assert.equal(rows[0].n, 0);
+});

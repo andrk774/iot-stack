@@ -340,3 +340,4 @@ progress { width: 160px; height: 8px; accent-color: var(--accent); }
   .chart-line.chart-s2 { stroke: #51cf66; } .chart-dot.chart-s2, .chart-swatch.chart-s2 { fill: #51cf66; background: #51cf66; }
   .chart-line.chart-s3 { stroke: #cc5de8; } .chart-dot.chart-s3, .chart-swatch.chart-s3 { fill: #cc5de8; background: #cc5de8; }
 }
+.check { display: inline-flex; gap: 8px; align-items: center; font-size: 0.9375rem; }

@@ -29,6 +29,7 @@ export class BridgeApi {
       if (!res.ok) {
         const err = new Error(`${method} ${path}: HTTP ${res.status} ${data?.error ?? ''}`);
         err.permanent = res.status === 400 || res.status === 401 || res.status === 409;
+        err.code = data?.error;
         throw err;
       }
       return data;
