@@ -91,15 +91,22 @@ export class Dispatcher {
     );
     const fresh = rows.filter((n) => this.now() - new Date(n.created_at).getTime() < STALE_MS);
     if (!fresh.length) return rows.length;
+    // уведомление дома получают владелец и все приглашённые участники — каждый по своим каналам
     const owners = [...new Set(fresh.map((n) => n.owner_id))];
+    const { rows: members } = await this.db.query(
+      'SELECT owner_id, user_id FROM home_members WHERE owner_id = ANY($1::uuid[])', [owners]);
+    const recipients = new Map(owners.map((o) => [o, new Set([o])]));
+    for (const m of members) recipients.get(m.owner_id)?.add(m.user_id);
+    const users = [...new Set([...recipients.values()].flatMap((s) => [...s]))];
     const { rows: channels } = await this.db.query(
       'SELECT id, owner_id, type, config, min_level FROM notification_channels WHERE enabled AND owner_id = ANY($1::uuid[])',
-      [owners],
+      [users],
     );
     const jobs = [];
     for (const n of fresh.sort((a, b) => Number(a.id) - Number(b.id))) {
+      const who = recipients.get(n.owner_id);
       for (const ch of channels) {
-        if (ch.owner_id !== n.owner_id || LEVEL_RANK[n.level] < LEVEL_RANK[ch.min_level]) continue;
+        if (!who.has(ch.owner_id) || LEVEL_RANK[n.level] < LEVEL_RANK[ch.min_level]) continue;
         jobs.push([ch, n]);
       }
     }

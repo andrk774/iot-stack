@@ -6,6 +6,7 @@ import { coerce } from './format.js';
 class Store {
   constructor() {
     this.me = null;
+    this.homes = [];
     this.devices = new Map();
     this.handlers = new Set();
     this.mqtt = null;
@@ -27,8 +28,13 @@ class Store {
 
   async init() {
     this.me = await get('/api/me');
+    await this.loadHomes();
     await this.loadDevices();
     this.startLive();
+  }
+
+  async loadHomes() {
+    try { this.homes = (await get('/api/homes')).homes; } catch { this.homes = []; }
   }
 
   async loadDevices() {
@@ -71,6 +77,7 @@ class Store {
     this.devices.clear();
     this.handlers.clear();
     this.me = null;
+    this.homes = [];
   }
 
   onMessage(topic, payload) {

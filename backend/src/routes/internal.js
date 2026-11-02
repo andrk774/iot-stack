@@ -2,7 +2,7 @@
 import { Router } from '../http.js';
 import { aclDecision, identify } from '../acl.js';
 import { safeEqual, verifySecret } from '../security.js';
-import { checkSessionToken } from './common.js';
+import { checkSessionToken, accessSql } from './common.js';
 
 const ALLOW = { result: 'allow', is_superuser: false };
 const ALLOW_SUPER = { result: 'allow', is_superuser: true };
@@ -50,7 +50,7 @@ export function internalRoutes({ db, config, log = console }) {
     if (d === 'deny') return DENY;
     const sql = d.lookup === 'bridge_device'
       ? 'SELECT 1 FROM devices WHERE id = $1 AND bridge_id = $2'
-      : 'SELECT 1 FROM devices WHERE id = $1 AND owner_id = $2';
+      : `SELECT 1 FROM devices d WHERE d.id = $1 AND ${accessSql('d.owner_id', '$2')}`; // своё или дома, куда пригласили
     const { rows } = await db.query(sql, [d.deviceId, d.lookup === 'bridge_device' ? d.bridgeId : d.userId]);
     return rows.length ? { result: 'allow' } : DENY;
   });

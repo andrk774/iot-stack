@@ -7,6 +7,7 @@ import {
 } from '../format.js';
 import { stateBadge, showClaimToken } from './devices.js';
 import { otaPanel } from './ota.js';
+import { can, homeLabel, sharedMode, ROLE_LABELS } from '../access.js';
 
 async function sendCommand(device, property, value) {
   try {
@@ -19,7 +20,7 @@ async function sendCommand(device, property, value) {
 }
 
 function control(device, p, current) {
-  if (!p.settable) return null;
+  if (!p.settable || !can(device, 'control')) return null;
   if (p.type === 'boolean') {
     const on = current === true;
     const btn = h('button', {
@@ -142,8 +143,10 @@ export function renderDevice(root, { id }) {
         stateBadge(device.state),
         h('span', null, `обновлено ${relativeTime(device.last_seen)}`),
         device.meta?.fw ? h('span', null, `прошивка ${device.meta.fw}`) : null,
-        device.bridge_id ? h('a', { href: '#/bridges' }, 'через мост') : null)),
-    h('button', { class: 'btn', type: 'button', onclick: () => renameDialog(device) }, 'Переименовать')));
+        device.bridge_id ? h('a', { href: '#/bridges' }, 'через мост') : null,
+        sharedMode() ? h('span', null, homeLabel(device.owner_id)) : null,
+        device.my_role && device.my_role !== 'owner' ? h('span', null, `ваш доступ: ${ROLE_LABELS[device.my_role]}`) : null)),
+    can(device, 'admin') ? h('button', { class: 'btn', type: 'button', onclick: () => renameDialog(device) }, 'Переименовать') : null));
 
   const drawTiles = () => {
     const props = deviceProps(device);
@@ -152,7 +155,7 @@ export function renderDevice(root, { id }) {
         h('p', null, device.provisioned
           ? 'Устройство привязано, но ещё ничего не прислало.'
           : 'Устройство ждёт привязки. Создайте токен и передайте его устройству.'),
-        device.provisioned || device.bridge_id ? null : h('button', { class: 'btn btn-primary', type: 'button', onclick: reclaim }, 'Получить токен привязки')));
+        device.provisioned || device.bridge_id || !can(device, 'admin') ? null : h('button', { class: 'btn btn-primary', type: 'button', onclick: reclaim }, 'Получить токен привязки')));
       return;
     }
     mount(tiles, ...props.map((p) => tile(device, p)));
@@ -182,7 +185,7 @@ export function renderDevice(root, { id }) {
   const chartHost = h('div');
   const drawChart = () => mount(chartHost, chartPanel(device));
   // OTA — только для устройств со своей прошивкой на нашем SDK (не через мост)
-  const ota = !device.bridge_id && device.provisioned ? otaPanel(device) : null;
+  const ota = !device.bridge_id && device.provisioned && can(device, 'admin') ? otaPanel(device) : null;
 
   mount(root, head, tiles, chartHost, ota?.el,
     h('section', { class: 'panel panel-quiet' },
@@ -192,9 +195,9 @@ export function renderDevice(root, { id }) {
           h('button', { class: 'btn btn-small', type: 'button', onclick: () => copyText(device.id) }, 'Копировать')),
         h('dt', null, 'Топики'), h('dd', null, h('code', null, `dev/${device.id}/…`)),
         h('dt', null, 'Создано'), h('dd', null, new Date(device.created_at).toLocaleString('ru-RU'))),
-      h('div', { class: 'row-actions' },
+      can(device, 'admin') ? h('div', { class: 'row-actions' },
         device.bridge_id ? null : h('button', { class: 'btn', type: 'button', onclick: reclaim }, 'Перепривязать'),
-        h('button', { class: 'btn btn-danger', type: 'button', onclick: remove }, 'Удалить устройство'))));
+        h('button', { class: 'btn btn-danger', type: 'button', onclick: remove }, 'Удалить устройство')) : null));
 
   drawHead();
   drawTiles();

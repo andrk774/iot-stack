@@ -52,7 +52,7 @@ test('internal hooks: user JWT auth and lookup-based ACL', async (t) => {
       if (sql.includes('FROM sessions WHERE id = $1 AND user_id = $2')) return { rows: p[0] === SID && p[1] === uid ? [{ last_seen_at: new Date() }] : [] };
       if (sql.includes('FROM bridges WHERE id')) return { rows: p[0] === bridge ? [{ mqtt_password_hash: bridgeHash }] : [] };
       if (sql.includes('AND bridge_id = $2')) return { rows: p[0] === dev && p[1] === bridge ? [{}] : [] };
-      if (sql.includes('AND owner_id = $2')) return { rows: p[0] === dev && p[1] === uid ? [{}] : [] };
+      if (sql.includes('owner_id = $2')) return { rows: p[0] === dev && p[1] === uid ? [{}] : [] };
       return { rows: [] };
     },
   };

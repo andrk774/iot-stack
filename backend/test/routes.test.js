@@ -57,8 +57,8 @@ const db = {
       store.devices.push(d);
       return { rows: [view(d)] };
     }
-    if (s.includes('FROM devices WHERE id = $1 AND owner_id = $2')) {
-      return { rows: store.devices.filter((d) => d.id === p[0] && d.owner_id === p[1]).map(view) };
+    if (s.includes('AS my_role FROM devices d WHERE d.id = $1')) {
+      return { rows: store.devices.filter((d) => d.id === p[0]).map((d) => ({ ...view(d), my_role: d.owner_id === p[1] ? 'owner' : null })) };
     }
     if (s.startsWith('SELECT id FROM devices WHERE claim_token_hash')) {
       return { rows: store.devices.filter((d) => d.claim_token_hash === p[0] && d.claim_expires_at > new Date()) };

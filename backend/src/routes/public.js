@@ -1,14 +1,14 @@
 import { Router, HttpError, reply, str } from '../http.js';
 import { DEVICE_ID_RE, PROP_RE } from '../acl.js';
 import { hashSecret, randomToken, sha256, newDeviceId } from '../security.js';
-import { makeAuth, withTx, lockScope } from './common.js';
+import { makeAuth, withTx, lockScope, roleSql, accessSql, requireRole, resolveHome } from './common.js';
 import { isSettable } from '../../../shared/scenario.js';
 
 const BUCKET_RE = /^(\d{1,4})(s|m|h|d)$/;
 const BUCKET_UNITS = { s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
 const MAX_RANGE_MS = 92 * 24 * 3600 * 1000;
 
-export const DEVICE_COLUMNS = `id, name, state, meta, last_values, last_seen, created_at, provisioned_at, bridge_id,
+export const DEVICE_COLUMNS = `id, owner_id, name, state, meta, last_values, last_seen, created_at, provisioned_at, bridge_id,
   (mqtt_password_hash IS NOT NULL OR bridge_id IS NOT NULL) AS provisioned`;
 
 const NO_EMQX = { kick: async () => false };
@@ -21,12 +21,13 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   const r = new Router();
   const auth = makeAuth(config, db);
 
-  const loadOwnDevice = async (userId, id) => {
+  /** Устройство, к которому у пользователя есть роль не ниже min (своё или в доме, куда пригласили) */
+  const loadDevice = async (userId, id, min) => {
     if (!DEVICE_ID_RE.test(id)) throw new HttpError(404, 'device_not_found');
     const { rows } = await db.query(
-      `SELECT ${DEVICE_COLUMNS} FROM devices WHERE id = $1 AND owner_id = $2`, [id, userId],
+      `SELECT ${DEVICE_COLUMNS}, ${roleSql('d.owner_id', '$2')} AS my_role FROM devices d WHERE d.id = $1`, [id, userId],
     );
-    if (!rows[0]) throw new HttpError(404, 'device_not_found');
+    requireRole(rows[0]?.my_role, min, 'device_not_found');
     return rows[0];
   };
 
@@ -36,7 +37,8 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   r.get('/api/devices', async ({ req }) => {
     const userId = await auth(req);
     const { rows } = await db.query(
-      `SELECT ${DEVICE_COLUMNS} FROM devices WHERE owner_id = $1 ORDER BY created_at`, [userId],
+      `SELECT ${DEVICE_COLUMNS}, ${roleSql('d.owner_id', '$1')} AS my_role FROM devices d
+       WHERE ${accessSql('d.owner_id', '$1')} ORDER BY created_at`, [userId],
     );
     return { devices: rows };
   });
@@ -49,40 +51,41 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
   r.post('/api/devices', async ({ req, body }) => {
     const userId = await auth(req);
     const name = str(body.name, 'name', { max: 64 });
+    const home = await resolveHome(db, userId, body.home, 'admin');
     const claim = newClaim();
     const device = await withTx(db, async (tx) => {
-      await lockScope(tx, 'devices', userId);
+      await lockScope(tx, 'devices', home);
       const { rows: cnt } = await tx.query(
-        'SELECT count(*)::int AS n FROM devices WHERE owner_id = $1 AND bridge_id IS NULL', [userId],
+        'SELECT count(*)::int AS n FROM devices WHERE owner_id = $1 AND bridge_id IS NULL', [home],
       );
       if (cnt[0].n >= config.maxDevicesPerUser) throw new HttpError(409, 'device_limit_reached');
       const { rows } = await tx.query(
         `INSERT INTO devices (id, owner_id, name, claim_token_hash, claim_expires_at)
          VALUES ($1, $2, $3, $4, $5) RETURNING ${DEVICE_COLUMNS}`,
-        [newDeviceId(), userId, name, claim.hash, claim.expiresAt],
+        [newDeviceId(), home, name, claim.hash, claim.expiresAt],
       );
-      return rows[0];
+      return { ...rows[0], my_role: home === userId ? 'owner' : 'admin' };
     });
     return reply(201, { device, claim_token: claim.token, claim_expires_at: claim.expiresAt });
   });
 
-  r.get('/api/devices/:id', async ({ req, params }) => loadOwnDevice(await auth(req), params.id));
+  r.get('/api/devices/:id', async ({ req, params }) => loadDevice(await auth(req), params.id, 'view'));
 
   r.put('/api/devices/:id', async ({ req, params, body }) => {
     const userId = await auth(req);
-    await loadOwnDevice(userId, params.id);
+    const d = await loadDevice(userId, params.id, 'admin');
     const name = str(body.name, 'name', { max: 64 });
     const { rows } = await db.query(
       `UPDATE devices SET name = $2 WHERE id = $1 RETURNING ${DEVICE_COLUMNS}`, [params.id, name],
     );
-    return rows[0];
+    return { ...rows[0], my_role: d.my_role };
   });
 
   // Новый токен привязки (перепрошивка/смена владельца). Старый MQTT-пароль перестаёт работать,
   // а уже открытая сессия устройства разрывается через REST API EMQX.
   r.post('/api/devices/:id/claim', async ({ req, params }) => {
     const userId = await auth(req);
-    const device = await loadOwnDevice(userId, params.id);
+    const device = await loadDevice(userId, params.id, 'admin');
     if (device.bridge_id) throw new HttpError(409, 'device_managed_by_bridge');
     const claim = newClaim();
     await db.query(
@@ -97,7 +100,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
 
   r.delete('/api/devices/:id', async ({ req, params }) => {
     const userId = await auth(req);
-    const device = await loadOwnDevice(userId, params.id);
+    const device = await loadDevice(userId, params.id, 'admin');
     await withTx(db, async (tx) => {
       await tx.query('DELETE FROM devices WHERE id = $1', [device.id]);
       await tx.query('DELETE FROM telemetry WHERE device_id = $1', [device.id]);
@@ -109,7 +112,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
 
   r.post('/api/devices/:id/commands', async ({ req, params, body }) => {
     const userId = await auth(req);
-    const device = await loadOwnDevice(userId, params.id);
+    const device = await loadDevice(userId, params.id, 'control');
     const property = str(body.property, 'property', { max: 32, re: PROP_RE });
     const { value } = body;
     if (!['string', 'number', 'boolean'].includes(typeof value) || String(value).length > 256) {
@@ -125,7 +128,7 @@ export function publicRoutes({ db, mqtt, config, emqx = NO_EMQX }) {
 
   r.get('/api/devices/:id/telemetry', async ({ req, params, query }) => {
     const userId = await auth(req);
-    const device = await loadOwnDevice(userId, params.id);
+    const device = await loadDevice(userId, params.id, 'view');
     const property = str(query.property, 'property', { max: 32, re: PROP_RE });
 
     const to = query.to ? new Date(query.to) : new Date();

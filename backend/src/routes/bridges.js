@@ -1,13 +1,13 @@
 // Мосты: учётки для сервисов-переводчиков (zigbee2mqtt, ESPHome, произвольный MQTT).
 import { Router, HttpError, reply, str } from '../http.js';
-import { makeAuth, withTx, lockScope } from './common.js';
+import { makeAuth, withTx, lockScope, roleSql, accessSql, requireRole, resolveHome } from './common.js';
 import { BRIDGE_ID_RE } from '../acl.js';
 import { hashSecret, verifySecret, randomToken, newDeviceId } from '../security.js';
 import { DEVICE_COLUMNS } from './public.js';
 import crypto from 'node:crypto';
 
 export const BRIDGE_TYPES = ['zigbee2mqtt', 'esphome', 'generic'];
-const COLUMNS = `b.id, b.name, b.type, b.config, b.state, b.last_seen, b.created_at,
+const COLUMNS = `b.id, b.owner_id, b.name, b.type, b.config, b.state, b.last_seen, b.created_at,
   (SELECT count(*)::int FROM devices d WHERE d.bridge_id = b.id) AS device_count`;
 const TOPIC_RE = /^[^#+\s][^#+\s]{0,199}$/;
 const FILTER_RE = /^[^\s]{1,200}$/;
@@ -68,22 +68,27 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
   const auth = makeAuth(config, db);
   const tokenCache = new Map(); // id -> { token, until } — scrypt на каждый запрос моста слишком дорог
 
+  // мосты (их токены и настройки) — только владельцу дома и администраторам
   const own = async (userId, id) => {
     if (!BRIDGE_ID_RE.test(id)) throw new HttpError(404, 'bridge_not_found');
-    const { rows } = await db.query(`SELECT ${COLUMNS} FROM bridges b WHERE b.id = $1 AND b.owner_id = $2`, [id, userId]);
-    if (!rows[0]) throw new HttpError(404, 'bridge_not_found');
+    const { rows } = await db.query(
+      `SELECT ${COLUMNS}, ${roleSql('b.owner_id', '$2')} AS my_role FROM bridges b WHERE b.id = $1`, [id, userId]);
+    requireRole(rows[0]?.my_role, 'admin', 'bridge_not_found');
     return rows[0];
   };
 
   // ---------- управление мостами (пользователь) ----------
   r.get('/api/bridges', async ({ req }) => {
     const userId = await auth(req);
-    const { rows } = await db.query(`SELECT ${COLUMNS} FROM bridges b WHERE b.owner_id = $1 ORDER BY b.name`, [userId]);
+    const { rows } = await db.query(
+      `SELECT ${COLUMNS}, ${roleSql('b.owner_id', '$1')} AS my_role FROM bridges b
+       WHERE ${accessSql('b.owner_id', '$1', 'admin')} ORDER BY b.name`, [userId]);
     return { bridges: rows };
   });
 
   r.post('/api/bridges', async ({ req, body }) => {
     const userId = await auth(req);
+    const home = await resolveHome(db, userId, body.home, 'admin');
     const name = str(body.name, 'name', { max: 64 });
     if (!BRIDGE_TYPES.includes(body.type)) throw new HttpError(400, 'validation', { field: 'type', reason: BRIDGE_TYPES.join('|') });
     const cfg = validateBridgeConfig(body.type, body.config);
@@ -91,12 +96,12 @@ export function bridgeRoutes({ db, config, log = console, emqx = { kick: async (
     const hash = await hashSecret(token); // до транзакции: scrypt не должен держать блокировку
     const id = newBridgeId();
     await withTx(db, async (tx) => {
-      await lockScope(tx, 'bridges', userId);
-      const { rows: cnt } = await tx.query('SELECT count(*)::int AS n FROM bridges WHERE owner_id = $1', [userId]);
+      await lockScope(tx, 'bridges', home);
+      const { rows: cnt } = await tx.query('SELECT count(*)::int AS n FROM bridges WHERE owner_id = $1', [home]);
       if (cnt[0].n >= 20) throw new HttpError(409, 'bridge_limit_reached');
       await tx.query(
         'INSERT INTO bridges (id, owner_id, name, type, config, mqtt_password_hash) VALUES ($1, $2, $3, $4, $5::jsonb, $6)',
-        [id, userId, name, body.type, JSON.stringify(cfg), hash],
+        [id, home, name, body.type, JSON.stringify(cfg), hash],
       );
     });
     return reply(201, { bridge: await own(userId, id), token });

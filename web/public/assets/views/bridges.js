@@ -3,6 +3,7 @@ import { get, post, put, del } from '../api.js';
 import { store } from '../store.js';
 import { relativeTime, errorMessage, STATE_LABELS } from '../format.js';
 import { stateBadge } from './devices.js';
+import { homeSelect, homeLabel, sharedMode } from '../access.js';
 
 const TYPES = {
   zigbee2mqtt: { label: 'Zigbee (zigbee2mqtt)', hint: 'Устройства и их свойства мост возьмёт из zigbee2mqtt сам.', profile: 'zigbee' },
@@ -72,13 +73,14 @@ function editDialog(bridge, onSaved) {
   typeSel.addEventListener('change', drawCfg);
   drawCfg();
   const error = h('p', { class: 'form-error', role: 'alert' });
+  const home = isNew ? homeSelect('admin') : null;
   const saveBtn = h('button', { class: 'btn btn-primary', type: 'button' }, isNew ? 'Создать мост' : 'Сохранить');
   const dlg = modal(isNew ? 'Новый мост' : `Настройки: ${bridge.name}`,
-    h('div', { class: 'stack' }, field('Название', name), field('Тип', typeSel), hint, cfgHost, error), [saveBtn]);
+    h('div', { class: 'stack' }, field('Название', name), home ? field('Дом', home) : null, field('Тип', typeSel), hint, cfgHost, error), [saveBtn]);
   saveBtn.addEventListener('click', async () => {
     error.textContent = '';
     try {
-      const body = { name: name.value.trim(), type: typeSel.value, config: cfg.read() };
+      const body = { name: name.value.trim(), type: typeSel.value, config: cfg.read(), ...(home ? { home: home.value } : {}) };
       if (isNew) {
         const res = await post('/api/bridges', body);
         dlg.close();
@@ -114,6 +116,7 @@ export function renderBridges(root) {
         h('div', null,
           h('span', { class: 'title' }, b.name),
           h('div', { class: 'list-sub' },
+            sharedMode() ? `${homeLabel(b.owner_id)} · ` : '',
             `${TYPES[b.type]?.label || b.type}, устройств: ${b.device_count}, `,
             b.last_seen ? `на связи ${relativeTime(b.last_seen)}` : 'ещё не подключался'),
           h('div', { class: 'list-sub' }, h('code', null, b.id))),

@@ -7,7 +7,7 @@
 import crypto from 'node:crypto';
 import { Router, HttpError, reply, str, RawBody } from '../http.js';
 import { DEVICE_ID_RE } from '../acl.js';
-import { makeAuth, withTx, lockScope } from './common.js';
+import { makeAuth, withTx, lockScope, roleSql, accessSql, requireRole, resolveHome } from './common.js';
 import { randomToken, sha256 } from '../security.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -15,7 +15,7 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
 const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$/;
 const MAX_FIRMWARES = 20;
 const JOB_TTL_MS = 24 * 3600 * 1000;
-const FW_COLUMNS = 'id, name, version, size, md5, sha256, created_at';
+const FW_COLUMNS = 'id, owner_id, name, version, size, md5, sha256, created_at';
 const JOB_COLUMNS = 'id, device_id, firmware_id, version, status, progress, error, created_at, updated_at, expires_at';
 export const OTA_STATUSES = ['downloading', 'rebooting', 'done', 'failed'];
 const FINAL = new Set(['done', 'failed', 'cancelled']);
@@ -34,18 +34,20 @@ export function otaRoutes({ db, mqtt, config }) {
   const auth = makeAuth(config, db);
   const maxBytes = config.firmwareMaxBytes || 4 * 1024 * 1024;
 
-  const ownDevice = async (userId, id) => {
+  const ownDevice = async (userId, id, min) => {
     if (!DEVICE_ID_RE.test(id)) throw new HttpError(404, 'device_not_found');
     const { rows } = await db.query(
-      `SELECT id, bridge_id, (mqtt_password_hash IS NOT NULL) AS provisioned, meta FROM devices WHERE id = $1 AND owner_id = $2`,
-      [id, userId]);
-    if (!rows[0]) throw new HttpError(404, 'device_not_found');
+      `SELECT id, owner_id, bridge_id, (mqtt_password_hash IS NOT NULL) AS provisioned, meta,
+              ${roleSql('d.owner_id', '$2')} AS my_role
+       FROM devices d WHERE d.id = $1`, [id, userId]);
+    requireRole(rows[0]?.my_role, min, 'device_not_found');
     return rows[0];
   };
 
   // ---------- библиотека прошивок ----------
   r.post('/api/firmwares', async ({ req, body, query }) => {
     const userId = await auth(req);
+    const home = await resolveHome(db, userId, query.home, 'admin');
     const name = str(query.name, 'name', { max: 64 });
     const version = str(query.version, 'version', { max: 32, re: VERSION_RE });
     const bad = checkFirmwareImage(body);
@@ -53,12 +55,12 @@ export function otaRoutes({ db, mqtt, config }) {
     const md5 = crypto.createHash('md5').update(body).digest('hex');
     const sha = crypto.createHash('sha256').update(body).digest('hex');
     const fw = await withTx(db, async (tx) => {
-      await lockScope(tx, 'firmwares', userId);
-      const { rows: cnt } = await tx.query('SELECT count(*)::int AS n FROM firmwares WHERE owner_id = $1', [userId]);
+      await lockScope(tx, 'firmwares', home);
+      const { rows: cnt } = await tx.query('SELECT count(*)::int AS n FROM firmwares WHERE owner_id = $1', [home]);
       if (cnt[0].n >= MAX_FIRMWARES) throw new HttpError(409, 'firmware_limit_reached');
       const { rows } = await tx.query(
         `INSERT INTO firmwares (owner_id, name, version, size, md5, sha256, data) VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING ${FW_COLUMNS}`, [userId, name, version, body.length, md5, sha, body]);
+         RETURNING ${FW_COLUMNS}`, [home, name, version, body.length, md5, sha, body]);
       return rows[0];
     });
     return reply(201, fw);
@@ -66,14 +68,16 @@ export function otaRoutes({ db, mqtt, config }) {
 
   r.get('/api/firmwares', async ({ req }) => {
     const userId = await auth(req);
-    const { rows } = await db.query(`SELECT ${FW_COLUMNS} FROM firmwares WHERE owner_id = $1 ORDER BY created_at DESC`, [userId]);
+    const { rows } = await db.query(
+      `SELECT ${FW_COLUMNS} FROM firmwares f WHERE ${accessSql('f.owner_id', '$1', 'admin')} ORDER BY created_at DESC`, [userId]);
     return { firmwares: rows, max_bytes: maxBytes };
   });
 
   r.delete('/api/firmwares/:id', async ({ req, params }) => {
     const userId = await auth(req);
     if (!UUID_RE.test(params.id)) throw new HttpError(404, 'firmware_not_found');
-    const { rowCount } = await db.query('DELETE FROM firmwares WHERE id = $1 AND owner_id = $2', [params.id, userId]);
+    const { rowCount } = await db.query(
+      `DELETE FROM firmwares f WHERE f.id = $1 AND ${accessSql('f.owner_id', '$2', 'admin')}`, [params.id, userId]);
     if (!rowCount) throw new HttpError(404, 'firmware_not_found');
     return reply(204);
   });
@@ -81,21 +85,22 @@ export function otaRoutes({ db, mqtt, config }) {
   // ---------- задания ----------
   r.get('/api/devices/:id/ota', async ({ req, params }) => {
     const userId = await auth(req);
-    const d = await ownDevice(userId, params.id);
+    const d = await ownDevice(userId, params.id, 'view');
     const { rows } = await db.query(`SELECT ${JOB_COLUMNS} FROM ota_jobs WHERE device_id = $1 ORDER BY created_at DESC LIMIT 1`, [d.id]);
     return { job: rows[0] || null, current_version: d.meta?.fw ?? null };
   });
 
   r.post('/api/devices/:id/ota', async ({ req, params, body }) => {
     const userId = await auth(req);
-    const d = await ownDevice(userId, params.id);
+    const d = await ownDevice(userId, params.id, 'admin');
     if (d.bridge_id) throw new HttpError(409, 'device_managed_by_bridge');
     if (!d.provisioned) throw new HttpError(409, 'device_not_provisioned');
     if (typeof body.firmware_id !== 'string' || !UUID_RE.test(body.firmware_id)) {
       throw new HttpError(400, 'validation', { field: 'firmware_id', reason: 'uuid' });
     }
     if (!mqtt.connected) throw new HttpError(503, 'mqtt_unavailable');
-    const { rows: fws } = await db.query(`SELECT ${FW_COLUMNS} FROM firmwares WHERE id = $1 AND owner_id = $2`, [body.firmware_id, userId]);
+    // прошивка из библиотеки того же дома, что и устройство
+    const { rows: fws } = await db.query(`SELECT ${FW_COLUMNS} FROM firmwares WHERE id = $1 AND owner_id = $2`, [body.firmware_id, d.owner_id]);
     const fw = fws[0];
     if (!fw) throw new HttpError(404, 'firmware_not_found');
 
@@ -118,7 +123,7 @@ export function otaRoutes({ db, mqtt, config }) {
 
   r.delete('/api/devices/:id/ota', async ({ req, params }) => {
     const userId = await auth(req);
-    const d = await ownDevice(userId, params.id);
+    const d = await ownDevice(userId, params.id, 'admin');
     const { rowCount } = await db.query(
       `UPDATE ota_jobs SET status = 'cancelled', updated_at = now()
        WHERE device_id = $1 AND status IN ('pending', 'downloading')`, [d.id]);

@@ -298,3 +298,8 @@ progress { width: 160px; height: 8px; accent-color: var(--accent); }
   .grid-2 { grid-template-columns: 1fr; }
   .list-row { grid-template-columns: 1fr; gap: 8px; padding: 14px 16px; }
 }
+
+.group-title { margin: 0; padding: 12px 20px 8px; font-size: 0.9375rem; font-weight: 600; background: var(--sunken); border-top: 1px solid var(--line); }
+.group-title:first-child { border-top: 0; border-radius: var(--radius-m) var(--radius-m) 0 0; }
+.role-note { font-size: 0.875rem; color: var(--muted); }
+.invite-note { margin: 0; padding: 10px 12px; border-radius: var(--radius-s); background: var(--accent-soft); color: var(--ink); font-size: 0.9375rem; }

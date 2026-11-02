@@ -1,6 +1,7 @@
 // Аккаунт: регистрация, вход (с 2FA), сессии, смена пароля.
 import { Router, HttpError, reply, str } from '../http.js';
-import { makeAuth } from './common.js';
+import { makeAuth, withTx } from './common.js';
+import { acceptInvite } from './homes.js';
 import {
   hashSecret, verifySecret, signJwt, sha256, newTotpSecret, verifyTotp, otpauthUrl,
   newRecoveryCodes, normalizeRecoveryCode,
@@ -43,15 +44,20 @@ export function accountRoutes({ db, config, emqx = {} }) {
     };
   }
 
+  // С приглашением регистрация работает, даже если ALLOW_REGISTRATION=false: так владелец зовёт семью
   r.post('/api/auth/register', async ({ req, body }) => {
-    if (!config.allowRegistration) throw new HttpError(403, 'registration_disabled');
+    const invite = typeof body.invite === 'string' && body.invite ? body.invite : null;
+    if (!config.allowRegistration && !invite) throw new HttpError(403, 'registration_disabled');
     const email = str(body.email, 'email', { max: 254, re: EMAIL_RE }).toLowerCase();
     const password = str(body.password, 'password', { min: 8, max: 128 });
+    const hash = await hashSecret(password);
     let user;
     try {
-      const { rows } = await db.query(
-        'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email', [email, await hashSecret(password)]);
-      user = rows[0];
+      user = await withTx(db, async (tx) => {
+        const { rows } = await tx.query('INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email', [email, hash]);
+        if (invite) await acceptInvite(tx, rows[0].id, invite);
+        return rows[0];
+      });
     } catch (e) {
       if (e.code === '23505') throw new HttpError(409, 'email_taken');
       throw e;
