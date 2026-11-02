@@ -227,6 +227,10 @@ async function api(req, res, url) {
     return json(res, 201, { device: d, claim_token: crypto.randomBytes(24).toString('base64url'), claim_expires_at: new Date(Date.now() + 1800e3).toISOString() });
   }
   if ((x = m(/^\/api\/devices\/(\w+)\/telemetry$/))) return json(res, 200, telemetry(x[1], url.searchParams));
+  if ((x = m(/^\/api\/devices\/(\w+)\/telemetry\.csv$/))) {
+    res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${x[1]}.csv"` });
+    return res.end('\ufefftime;property;avg;min;max;count\r\n2026-11-01T00:00:00.000Z;temperature;22,5;20,1;24,9;144\r\n');
+  }
   if ((x = m(/^\/api\/devices\/(\w+)\/commands$/))) {
     const d = devices.get(x[1]);
     setTimeout(() => { d.last_values[body.property] = body.value; broadcast(`dev/${d.id}/${body.property}`, String(body.value)); }, 400);

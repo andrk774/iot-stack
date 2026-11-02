@@ -40,3 +40,19 @@ export async function migrate(pool, { dir = DIR, log = console } = {}) {
     client.release();
   }
 }
+
+/**
+ * После миграций, вне транзакции: один раз заполнить почасовые агрегаты по уже накопленной телеметрии
+ * (непрерывный агрегат создаётся WITH NO DATA, а фоновая политика обновляет только последние 3 дня).
+ */
+export async function backfillAggregates(pool, { log = console } = {}) {
+  const { rows } = await pool.query("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'");
+  if (!rows.length) return false;
+  const { rows: done } = await pool.query("SELECT 1 FROM server_settings WHERE key = 'telemetry_hourly_backfilled'");
+  if (done.length) return false;
+  log.log?.('telemetry_hourly: заполнение по истории…');
+  await pool.query("CALL refresh_continuous_aggregate('telemetry_hourly', NULL, now() - INTERVAL '1 hour')");
+  await pool.query(
+    "INSERT INTO server_settings (key, value) VALUES ('telemetry_hourly_backfilled', 'true'::jsonb) ON CONFLICT (key) DO NOTHING");
+  return true;
+}
