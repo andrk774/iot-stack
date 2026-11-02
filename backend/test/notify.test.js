@@ -126,6 +126,7 @@ function fakeDb(notifications, channels) {
         batch.forEach((n) => { n.dispatched = true; });
         return { rows: batch };
       }
+      if (s.startsWith('SELECT owner_id, user_id FROM home_members')) return { rows: [] };
       if (s.startsWith('SELECT id, owner_id, type, config, min_level FROM notification_channels')) {
         return { rows: channels.filter((c) => c.enabled !== false && p[0].includes(c.owner_id)) };
       }

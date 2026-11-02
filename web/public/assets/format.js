@@ -123,6 +123,13 @@ const ERRORS = {
   totp_setup_required: 'Начните подключение заново',
   session_not_found: 'Сеанс уже завершён',
   push_denied: 'Уведомления запрещены в браузере',
+  forbidden: 'Не хватает прав: попросите владельца дома',
+  home_not_found: 'Дом не найден',
+  invite_not_found: 'Приглашение недействительно или уже использовано',
+  invite_own_home: 'Это приглашение в ваш собственный дом',
+  invite_limit_reached: 'Слишком много неиспользованных приглашений',
+  member_limit_reached: 'В доме уже максимум участников',
+  member_not_found: 'Участник не найден',
 };
 
 export function errorMessage(err) {

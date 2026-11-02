@@ -14,6 +14,11 @@ const now = () => new Date().toISOString();
 const ago = (s) => new Date(Date.now() - s * 1000).toISOString();
 
 const devices = new Map([
+  ['dabcabcabcabcabc1', {
+    id: 'dabcabcabcabcabc1', owner_id: 'parent-home', my_role: 'control', name: 'Дача: котёл', state: 'ready', provisioned: true, bridge_id: null, created_at: ago(86400 * 100), last_seen: ago(30),
+    meta: { name: 'Котёл', fw: '2.1.0', props: { temperature: { type: 'float', unit: '°C' }, heating: { type: 'boolean', settable: true } } },
+    last_values: { temperature: 54.5, heating: true },
+  }],
   ['d1a2b3c4d5e6f7081', {
     id: 'd1a2b3c4d5e6f7081', name: 'Теплица', state: 'ready', provisioned: true, bridge_id: null, created_at: ago(86400 * 20), last_seen: ago(4),
     meta: { name: 'Теплица', fw: '1.2.0', props: {
@@ -179,7 +184,13 @@ async function api(req, res, url) {
     { id: 's2', current: false, created_at: ago(86400 * 9), last_seen_at: ago(3600 * 20), user_agent: 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/129.0 Mobile Safari/537.36', ip: '176.59.3.4' },
   ] });
   if (p === '/api/sessions/revoke-others') return json(res, 200, { closed: 1 });
-  if (p === '/api/devices' && req.method === 'GET') return json(res, 200, { devices: [...devices.values()] });
+  if (p === '/api/devices' && req.method === 'GET') return json(res, 200, { devices: [...devices.values()].map((d) => ({ owner_id: USER.id, my_role: 'owner', ...d })) });
+  if (p === '/api/homes') return json(res, 200, { homes: [{ owner_id: USER.id, owner_email: USER.email, role: 'owner' }, { owner_id: 'parent-home', owner_email: 'mama@example.com', role: 'control' }] });
+  if (p === '/api/members' && req.method === 'GET') return json(res, 200, { members: [{ user_id: 'u-son', email: 'son@example.com', role: 'control', created_at: ago(86400 * 30) }, { user_id: 'u-wife', email: 'wife@example.com', role: 'admin', created_at: ago(86400 * 90) }], invites: [{ id: 'i1', role: 'view', created_at: ago(3600), expires_at: new Date(Date.now() + 6 * 86400e3).toISOString() }] });
+  if ((x = m(/^\/api\/members\/([\w-]+)$/))) return json(res, req.method === 'DELETE' ? 204 : 200, { user_id: x[1], role: body?.role });
+  if (p === '/api/invites' && req.method === 'POST') return json(res, 201, { id: 'i2', role: body.role, code: 'x'.repeat(32), url: `http://${req.headers.host}/#/join/${'x'.repeat(32)}`, expires_at: new Date(Date.now() + 7 * 86400e3).toISOString() });
+  if ((x = m(/^\/api\/invites\/([\w-]+)$/))) return json(res, 204);
+  if (p === '/api/invites/accept') return json(res, 200, { owner_id: 'parent-home', owner_email: 'mama@example.com', role: 'control' });
   if (p === '/api/devices' && req.method === 'POST') {
     const d = { id: rid('d', 8), name: body.name, state: 'new', provisioned: false, bridge_id: null, created_at: now(), last_seen: null, meta: null, last_values: {} };
     devices.set(d.id, d);

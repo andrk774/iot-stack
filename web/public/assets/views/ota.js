@@ -2,6 +2,7 @@
 import { h, mount, toast, actionButton, field } from '../dom.js';
 import { get, post, del, upload } from '../api.js';
 import { relativeTime, errorMessage, formatBytes, OTA_LABELS } from '../format.js';
+import { homeSelect, homeLabel, sharedMode } from '../access.js';
 
 const ACTIVE = new Set(['pending', 'downloading', 'rebooting']);
 const TONE = { done: 'ok', failed: 'bad', cancelled: 'muted', pending: 'warn', downloading: 'warn', rebooting: 'warn' };
@@ -55,7 +56,8 @@ export function otaPanel(device) {
     try {
       const [o, f] = await Promise.all([get(`/api/devices/${device.id}/ota`), get('/api/firmwares')]);
       job = o.job;
-      firmwares = f.firmwares;
+      // прошивки из библиотеки дома, которому принадлежит устройство
+      firmwares = f.firmwares.filter((x) => !x.owner_id || !device.owner_id || x.owner_id === device.owner_id);
       draw();
     } catch (e) {
       mount(body, h('p', { class: 'form-error' }, errorMessage(e)));
@@ -81,6 +83,7 @@ export function firmwaresSection() {
   const name = h('input', { maxlength: 64, placeholder: 'Например, «Реле кухни»' });
   const version = h('input', { maxlength: 32, placeholder: '1.1.0' });
   const error = h('p', { class: 'form-error', role: 'alert' });
+  const home = homeSelect('admin');
   let maxBytes = 4 * 1024 * 1024;
 
   const load = async () => {
@@ -95,7 +98,7 @@ export function firmwaresSection() {
         h('span', { class: 'tag' }, f.version),
         h('div', null,
           h('span', { class: 'title' }, f.name),
-          h('div', { class: 'list-sub' }, `${formatBytes(f.size)}, загружена ${relativeTime(f.created_at)}`),
+          h('div', { class: 'list-sub' }, `${sharedMode() ? `${homeLabel(f.owner_id)} · ` : ''}${formatBytes(f.size)}, загружена ${relativeTime(f.created_at)}`),
           h('div', { class: 'list-sub' }, h('code', { title: 'SHA-256' }, f.sha256.slice(0, 16)), '…')),
         h('div', { class: 'row-actions', style: { marginTop: 0 } },
           actionButton('Удалить', async () => {
@@ -122,7 +125,7 @@ export function firmwaresSection() {
     if (f.size > maxBytes) { error.textContent = `Файл больше ${formatBytes(maxBytes)}`; return; }
     if (!name.value.trim() || !version.value.trim()) { error.textContent = 'Укажите название и версию — ту же, что в прошивке'; return; }
     try {
-      const q = new URLSearchParams({ name: name.value.trim(), version: version.value.trim() });
+      const q = new URLSearchParams({ name: name.value.trim(), version: version.value.trim(), ...(home ? { home: home.value } : {}) });
       await upload(`/api/firmwares?${q}`, f);
       file.value = '';
       name.value = '';
@@ -139,6 +142,7 @@ export function firmwaresSection() {
     h('div', { class: 'panel-head' }, h('h2', { id: 'fw-title', class: 'section-title' }, 'Прошивки для OTA')),
     h('p', { class: 'muted' }, 'Файл .bin приложения (Arduino IDE: «Экспорт бинарного файла», PlatformIO: firmware.bin). Версия должна совпадать с указанной в скетче: по ней устройство поймёт, что обновилось.'),
     h('div', { class: 'grid-3' }, field('Файл', file), field('Название', name), field('Версия', version)),
+    home ? field('Дом', home) : null,
     h('div', { class: 'row-actions' }, send),
     error,
     host);

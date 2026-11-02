@@ -1,6 +1,7 @@
 import { h, mount, toast, actionButton, field } from '../dom.js';
 import { get, post, put, del } from '../api.js';
 import { store } from '../store.js';
+import { can, homeLabel, homeSelect, sharedMode } from '../access.js';
 import { deviceProps, relativeTime, errorMessage } from '../format.js';
 
 const OP_LABELS = { gt: 'больше', gte: 'не меньше', lt: 'меньше', lte: 'не больше', eq: 'равно', ne: 'не равно', changed: 'изменилось' };
@@ -16,6 +17,9 @@ const CRON_PRESETS = [
 const browserTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return 'UTC'; } })();
 
 // ---------- описание сценария словами ----------
+// дом редактируемого сценария: в нём выбираются устройства
+let editorHome = null;
+
 const devName = (id) => store.devices.get(id)?.name || 'удалённое устройство';
 const fmtVal = (v) => (v === true ? 'вкл' : v === false ? 'выкл' : String(v));
 
@@ -59,14 +63,16 @@ export function renderScenarios(root) {
             await load();
           } catch (e) { toast(errorMessage(e), 'error'); toggle.disabled = false; }
         });
+        const editable = can(s, 'admin');
         return h('div', { class: 'list-row' },
-          toggle,
+          editable ? toggle : h('span', { class: `state ${s.enabled ? 'state-ok' : ''}` }, h('span', { class: 'state-dot', 'aria-hidden': 'true' }), s.enabled ? 'вкл' : 'выкл'),
           h('div', null,
             h('a', { class: 'title', href: `#/scenarios/${s.id}` }, s.name),
+            sharedMode() ? h('div', { class: 'list-sub' }, homeLabel(s.owner_id)) : null,
             h('div', { class: 'list-sub' }, describeTrigger(s.trigger),
               s.last_run_at ? ` · запускался ${relativeTime(s.last_run_at)}` : ''),
             s.last_error ? h('div', { class: 'list-error' }, s.last_error) : null),
-          s.trigger.type === 'manual' || s.enabled
+          (s.trigger.type === 'manual' || s.enabled) && can(s, 'control')
             ? actionButton('Запустить', async () => {
               try { await post(`/api/scenarios/${s.id}/run`); toast(`«${s.name}» запущен`); } catch (e) { toast(errorMessage(e), 'error'); }
             }, 'btn btn-small') : h('span'));
@@ -85,7 +91,7 @@ export function renderScenarios(root) {
 
 // ---------- редактор ----------
 function deviceSelect(value, onChange, filter = () => true) {
-  const devices = [...store.devices.values()].filter(filter).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  const devices = [...store.devices.values()].filter((d) => filter(d) && (!editorHome || d.owner_id === editorHome)).sort((a, b) => a.name.localeCompare(b.name, 'ru'));
   const sel = h('select', { 'aria-label': 'Устройство' },
     h('option', { value: '' }, '— устройство —'),
     ...devices.map((d) => h('option', { value: d.id, selected: d.id === value }, d.name)));
@@ -152,6 +158,21 @@ function comparisonRow(c, rerender, { allowChanged }) {
 
 export function renderScenarioEditor(root, { id }) {
   const isNew = id === 'new';
+  editorHome = store.me?.id || null;
+  const homeSel = isNew ? homeSelect('admin') : null;
+  if (homeSel) {
+    homeSel.value = editorHome;
+    homeSel.addEventListener('change', () => {
+      editorHome = homeSel.value;
+      // устройства другого дома в сценарии не годятся — начинаем с чистого
+      s.trigger = { type: s.trigger.type === 'schedule' || s.trigger.type === 'manual' ? s.trigger.type : 'property', ...(s.trigger.type === 'schedule' ? { cron: s.trigger.cron, tz: s.trigger.tz } : {}), op: 'gt' };
+      s.conditions = [];
+      s.actions = [{ type: 'set' }];
+      drawAll();
+    });
+  }
+  const readOnlyNote = h('p', { class: 'role-note', hidden: true }, 'У вас доступ только на просмотр этого сценария.');
+  const buttons = h('div', { class: 'row-actions' });
   let s = {
     name: '', enabled: true, cooldown_sec: 0,
     trigger: { type: 'property', op: 'gt' },
@@ -264,7 +285,7 @@ export function renderScenarioEditor(root, { id }) {
     s.name = nameInput.value.trim();
     s.cooldown_sec = Number(cooldown.value) || 0;
     try {
-      const saved = isNew ? await post('/api/scenarios', s) : await put(`/api/scenarios/${id}`, s);
+      const saved = isNew ? await post('/api/scenarios', { ...s, ...(homeSel ? { home: editorHome } : {}) }) : await put(`/api/scenarios/${id}`, s);
       toast('Сценарий сохранён');
       location.hash = `#/scenarios/${saved.id}`;
       if (!isNew) { s = saved; drawAll(); }
@@ -278,7 +299,20 @@ export function renderScenarioEditor(root, { id }) {
     try { await del(`/api/scenarios/${id}`); location.hash = '#/scenarios'; toast('Сценарий удалён'); } catch (e) { toast(errorMessage(e), 'error'); }
   };
 
+  const drawButtons = () => {
+    const editable = isNew || can(s, 'admin');
+    readOnlyNote.hidden = editable;
+    mount(buttons,
+      editable ? actionButton('Сохранить сценарий', save, 'btn btn-primary') : null,
+      isNew || !can(s, 'control') ? null : actionButton('Запустить сейчас', async () => {
+        try { await post(`/api/scenarios/${id}/run`); toast('Запущено'); } catch (e) { toast(errorMessage(e), 'error'); }
+      }),
+      isNew || !editable ? null : h('button', { class: 'btn btn-danger', type: 'button', onclick: remove }, 'Удалить'));
+  };
+
   const drawAll = () => {
+    if (s.owner_id) editorHome = s.owner_id;
+    drawButtons();
     nameInput.value = s.name;
     cooldown.value = String(s.cooldown_sec ?? 0);
     drawTrigger();
@@ -291,17 +325,14 @@ export function renderScenarioEditor(root, { id }) {
       h('div', null, h('a', { class: 'back', href: '#/scenarios' }, 'Сценарии'), h('h1', null, isNew ? 'Новый сценарий' : 'Сценарий'))),
     h('section', { class: 'panel' },
       field('Название', nameInput),
+      homeSel ? field('Дом', homeSel, 'Сценарий работает с устройствами этого дома') : null,
       h('h2', { class: 'section-title' }, 'Когда запускать'), triggerHost,
       h('h2', { class: 'section-title' }, 'Дополнительные условия'), condHost,
       h('h2', { class: 'section-title' }, 'Что сделать'), actionHost,
       field('Не запускать повторно, секунд', cooldown, '0 — без ограничения. Полезно для уведомлений, чтобы не получать их каждую минуту.'),
       error,
-      h('div', { class: 'row-actions' },
-        actionButton('Сохранить сценарий', save, 'btn btn-primary'),
-        isNew ? null : actionButton('Запустить сейчас', async () => {
-          try { await post(`/api/scenarios/${id}/run`); toast('Запущено'); } catch (e) { toast(errorMessage(e), 'error'); }
-        }),
-        isNew ? null : h('button', { class: 'btn btn-danger', type: 'button', onclick: remove }, 'Удалить')))));
+      readOnlyNote,
+      buttons)));
 
   if (isNew) drawAll();
   else {

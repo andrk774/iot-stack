@@ -10,6 +10,7 @@ import { channelRoutes, linkTelegramChat, unlinkTelegramChat } from '../src/rout
 import { Dispatcher } from '../src/notify/dispatcher.js';
 import { otaRoutes, handleOtaStatus } from '../src/routes/ota.js';
 import { accountRoutes } from '../src/routes/account.js';
+import { homeRoutes } from '../src/routes/homes.js';
 import { createWebPush } from '../src/notify/webpush.js';
 import crypto from 'node:crypto';
 import { totpCode } from '../src/security.js';
@@ -66,7 +67,7 @@ before(async () => {
   await migrate(db, { log: {} }); // повторно — ничего не делает
   const mqtt = mqttFake;
   const webpush = await createWebPush({ db, subject: 'https://iot.test', log: {} });
-  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
+  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(homeRoutes({ db, config, emqx })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
     .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' }, webpush }))
     .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
@@ -463,4 +464,103 @@ test('web push subscription channel on real SQL', { skip }, async () => {
   assert.equal((await call(apiUrl, 'POST', '/api/channels', sub(ep + 'x', Buffer.alloc(65, 4).toString('base64url')), auth)).status, 400);
   const { rows } = await db.query("SELECT count(*)::int AS n FROM server_settings WHERE key = 'vapid'");
   assert.equal(rows[0].n, 1);
+});
+
+test('shared homes: roles, invites, MQTT ACL, notifications on real SQL', { skip }, async () => {
+  const reg = async (email, extra = {}) => {
+    const r = await call(apiUrl, 'POST', '/api/auth/register', { email, password: 'password123', ...extra });
+    return { status: r.status, auth: `Bearer ${r.body?.token}`, id: r.body?.user?.id, body: r.body };
+  };
+  const A = await reg('owner@h.ru');
+  const E = await reg('admin@h.ru');
+  const C = await reg('viewer@h.ru');
+  const D = await reg('stranger@h.ru');
+  const dev = (await call(apiUrl, 'POST', '/api/devices', { name: 'Котёл' }, A.auth)).body.device;
+  await call(apiUrl, 'POST', '/api/provision', { claim_token: (await call(apiUrl, 'POST', `/api/devices/${dev.id}/claim`, {}, A.auth)).body.claim_token });
+  const sc = (await call(apiUrl, 'POST', '/api/scenarios', { name: 'Ручной', trigger: { type: 'manual' }, actions: [{ type: 'notify', message: 'x' }] }, A.auth)).body;
+
+  const invite = async (role, who = A) => (await call(apiUrl, 'POST', '/api/invites', { role }, who.auth)).body;
+  // регистрация по приглашению работает и при выключенной регистрации
+  const invB = await invite('control');
+  assert.match(invB.url, /^https:\/\/iot\.test\/#\/join\//);
+  config.allowRegistration = false;
+  assert.equal((await reg('nobody@h.ru')).status, 403);
+  assert.equal((await reg('nobody@h.ru', { invite: 'x'.repeat(32) })).status, 404); // неверный код — аккаунт не создаётся
+  const B = await reg('member@h.ru', { invite: invB.code });
+  config.allowRegistration = true;
+  assert.equal(B.status, 201);
+  assert.equal((await reg('nobody@h.ru')).status, 201); // предыдущая попытка откатилась целиком
+  assert.equal((await call(apiUrl, 'POST', '/api/invites/accept', { code: invB.code }, D.auth)).status, 404); // одноразовое
+  const own = await invite('view');
+  assert.equal((await call(apiUrl, 'POST', '/api/invites/accept', { code: own.code }, A.auth)).status, 409);
+  assert.equal((await call(apiUrl, 'POST', '/api/invites/accept', { code: (await invite('view')).code }, C.auth)).body.owner_email, 'owner@h.ru');
+  assert.equal((await call(apiUrl, 'POST', '/api/invites/accept', { code: (await invite('admin')).code }, E.auth)).body.role, 'admin');
+
+  // control: видит и управляет, но не меняет
+  const listB = await call(apiUrl, 'GET', '/api/devices', null, B.auth);
+  assert.deepEqual(listB.body.devices.map((d) => [d.id, d.my_role, d.owner_id]), [[dev.id, 'control', A.id]]);
+  assert.equal((await call(apiUrl, 'POST', `/api/devices/${dev.id}/commands`, { property: 'relay', value: true }, B.auth)).status, 202);
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}/telemetry?property=t`, null, B.auth)).status, 200);
+  assert.equal((await call(apiUrl, 'PUT', `/api/devices/${dev.id}`, { name: 'x' }, B.auth)).status, 403);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/devices/${dev.id}`, null, B.auth)).status, 403);
+  assert.equal((await call(apiUrl, 'POST', `/api/devices/${dev.id}/claim`, {}, B.auth)).status, 403);
+  assert.equal((await call(apiUrl, 'POST', `/api/scenarios/${sc.id}/run`, {}, B.auth)).status, 202);
+  assert.equal((await call(apiUrl, 'PUT', `/api/scenarios/${sc.id}`, { name: 'y', trigger: { type: 'manual' }, actions: [{ type: 'notify', message: 'x' }] }, B.auth)).status, 403);
+  assert.equal((await call(apiUrl, 'GET', '/api/scenarios', null, B.auth)).body.scenarios[0].my_role, 'control');
+  assert.equal((await call(apiUrl, 'GET', '/api/bridges', null, B.auth)).body.bridges.length, 0);
+  assert.equal((await call(apiUrl, 'POST', '/api/devices', { name: 'чужой', home: A.id }, B.auth)).status, 403);
+  // в свой дом B добавляет устройства как обычно
+  assert.equal((await call(apiUrl, 'POST', '/api/devices', { name: 'своё' }, B.auth)).body.device.owner_id, B.id);
+
+  // view: только смотреть
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}`, null, C.auth)).body.my_role, 'view');
+  assert.equal((await call(apiUrl, 'POST', `/api/devices/${dev.id}/commands`, { property: 'relay', value: true }, C.auth)).status, 403);
+  assert.equal((await call(apiUrl, 'POST', `/api/scenarios/${sc.id}/run`, {}, C.auth)).status, 403);
+
+  // посторонний не видит ничего
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}`, null, D.auth)).status, 404);
+  assert.equal((await call(apiUrl, 'GET', `/api/scenarios/${sc.id}`, null, D.auth)).status, 404);
+  assert.equal((await call(apiUrl, 'POST', '/api/devices', { name: 'x', home: A.id }, D.auth)).status, 404);
+  const acl = async (who) => (await call(hooksUrl, 'POST', '/internal/mqtt/acl', { username: `u:${who.id}`, topic: `dev/${dev.id}/#`, action: 'subscribe' })).body.result;
+  assert.deepEqual([await acl(A), await acl(B), await acl(C), await acl(D)], ['allow', 'allow', 'allow', 'deny']);
+
+  // admin: создаёт в доме владельца, но только с устройствами этого дома
+  const eDev = (await call(apiUrl, 'POST', '/api/devices', { name: 'Насос', home: A.id }, E.auth)).body.device;
+  assert.equal(eDev.owner_id, A.id);
+  assert.equal(eDev.my_role, 'admin');
+  const eOwn = (await call(apiUrl, 'POST', '/api/devices', { name: 'моё' }, E.auth)).body.device;
+  const mk = (devId) => ({ name: 'S', home: A.id, trigger: { type: 'state', device_id: devId, state: 'lost' }, actions: [{ type: 'notify', message: 'x' }] });
+  assert.equal((await call(apiUrl, 'POST', '/api/scenarios', mk(eDev.id), E.auth)).body.owner_id, A.id);
+  assert.equal((await call(apiUrl, 'POST', '/api/scenarios', mk(eOwn.id), E.auth)).body.error, 'device_not_found');
+  assert.equal((await call(apiUrl, 'POST', '/api/bridges', { name: 'Z', type: 'zigbee2mqtt', config: {}, home: A.id }, E.auth)).status, 201);
+  assert.equal((await call(apiUrl, 'GET', '/api/bridges', null, A.auth)).body.bridges.length, 1);
+  assert.equal((await call(apiUrl, 'GET', '/api/bridges', null, B.auth)).body.bridges.length, 0);
+
+  // уведомления дома видят и получают участники
+  const before = (await call(apiUrl, 'GET', '/api/notifications', null, B.auth)).body.notifications.length;
+  await db.query("INSERT INTO notifications (owner_id, level, message) VALUES ($1, 'alert', 'Протечка')", [A.id]);
+  assert.equal((await call(apiUrl, 'GET', '/api/notifications', null, B.auth)).body.notifications.length, before + 1);
+  assert.equal((await call(apiUrl, 'GET', '/api/notifications', null, D.auth)).body.notifications.length, 0);
+  const chB = (await call(apiUrl, 'POST', '/api/channels', { type: 'webhook', url: 'https://example.com/b' }, B.auth)).body.channel;
+  const chD = (await call(apiUrl, 'POST', '/api/channels', { type: 'webhook', url: 'https://example.com/d' }, D.auth)).body.channel;
+  testSent.length = 0;
+  await new Dispatcher({ db, log: {}, sleep: async () => {}, senders: testSenders }).kick();
+  assert.ok(testSent.some(([id, m]) => id === chB.id && m === 'Протечка'));
+  assert.ok(!testSent.some(([id]) => id === chD.id));
+
+  // владелец меняет роль и убирает участника; участник может выйти сам
+  const homesB = await call(apiUrl, 'GET', '/api/homes', null, B.auth);
+  assert.deepEqual(homesB.body.homes.map((h) => h.role), ['owner', 'control']);
+  const members = await call(apiUrl, 'GET', '/api/members', null, A.auth);
+  assert.equal(members.body.members.length, 3);
+  assert.equal((await call(apiUrl, 'PUT', `/api/members/${B.id}`, { role: 'view' }, A.auth)).body.role, 'view');
+  assert.equal((await call(apiUrl, 'PUT', `/api/members/${A.id}`, { role: 'admin' }, B.auth)).status, 404); // не владелец
+  assert.equal((await call(apiUrl, 'POST', `/api/devices/${dev.id}/commands`, { property: 'relay', value: true }, B.auth)).status, 403);
+  kicked.length = 0;
+  assert.equal((await call(apiUrl, 'DELETE', `/api/members/${B.id}`, null, A.auth)).status, 204);
+  assert.ok(kicked.includes(`u:${B.id}`));
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}`, null, B.auth)).status, 404);
+  assert.equal(await acl(B), 'deny');
+  assert.equal((await call(apiUrl, 'DELETE', `/api/members/${C.id}?owner=${A.id}`, null, C.auth)).status, 204);
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}`, null, C.auth)).status, 404);
 });

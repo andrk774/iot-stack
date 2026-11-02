@@ -15,6 +15,7 @@ import { Dispatcher, makeSenders } from './notify/dispatcher.js';
 import { createWebPush } from './notify/webpush.js';
 import { otaRoutes, handleOtaStatus } from './routes/ota.js';
 import { accountRoutes } from './routes/account.js';
+import { homeRoutes } from './routes/homes.js';
 
 const config = loadConfig();
 
@@ -105,6 +106,7 @@ telegramBot?.start();
 
 const api = new Router()
   .use(accountRoutes({ db, config, emqx }))
+  .use(homeRoutes({ db, config, emqx }))
   .use(publicRoutes({ db, mqtt, config, emqx }))
   .use(scenarioRoutes({ db, config }))
   .use(bridgeRoutes({ db, config, emqx }))

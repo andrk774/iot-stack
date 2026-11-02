@@ -9,6 +9,7 @@ import { renderScenarios, renderScenarioEditor } from './views/scenarios.js';
 import { renderBridges } from './views/bridges.js';
 import { renderNotifications } from './views/notifications.js';
 import { renderSettings } from './views/settings.js';
+import { acceptPendingInvite } from './views/members.js';
 
 const app = document.getElementById('app');
 let cleanup = () => {};
@@ -93,7 +94,23 @@ function route() {
 }
 
 let badgeTimer;
+// Приглашение #/join/<код>: запоминаем до входа, принимаем после
+const INVITE_KEY = 'iot.invite';
+function takeInviteFromUrl() {
+  const m = /^#\/join\/([A-Za-z0-9_-]{32})$/.exec(location.hash);
+  if (!m) return;
+  try { sessionStorage.setItem(INVITE_KEY, m[1]); } catch { /* приватный режим */ }
+  history.replaceState(null, '', `${location.pathname}#/devices`);
+}
+function pendingInvite() {
+  try { return sessionStorage.getItem(INVITE_KEY); } catch { return null; }
+}
+function clearInvite() {
+  try { sessionStorage.removeItem(INVITE_KEY); } catch { /* ignore */ }
+}
+
 async function start() {
+  takeInviteFromUrl();
   cleanup();
   cleanup = () => {};
   clearInterval(badgeTimer);
@@ -114,13 +131,21 @@ async function start() {
     }
     return;
   }
+  const invite = pendingInvite();
+  if (invite) {
+    clearInvite();
+    await acceptPendingInvite(invite).catch((e) => toast(errorMessage(e), 'error'));
+  }
   shell = buildShell();
   route();
   refreshBadge();
   badgeTimer = setInterval(refreshBadge, 30000);
 }
 
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => {
+  if (location.hash.startsWith('#/join/')) { start(); return; }
+  route();
+});
 window.addEventListener('unhandledrejection', (e) => {
   if (e.reason?.code) toast(errorMessage(e.reason), 'error');
 });

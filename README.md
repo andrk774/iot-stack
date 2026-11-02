@@ -128,6 +128,23 @@ docker compose exec backend node scripts/reset-password.js you@example.com      
 docker compose exec backend node scripts/reset-password.js you@example.com --no-2fa  # и выключить 2FA
 ```
 
+## Общий доступ
+
+**Настройки → Общий доступ → Пригласить:** одноразовая ссылка `https://<host>/#/join/<код>` (7 дней) с ролью:
+
+| Роль | Может |
+|---|---|
+| просмотр | видеть устройства, графики, сценарии, ленту уведомлений |
+| управление | ещё отправлять команды устройствам и запускать сценарии |
+| администратор | ещё добавлять, переименовывать и удалять устройства, сценарии, мосты; обновлять прошивки |
+| владелец | всё, плюс участники и приглашения |
+
+По ссылке можно зарегистрироваться, даже если `ALLOW_REGISTRATION=false`. Уведомления дома получают все участники —
+каждый по своим каналам и со своим порогом. Каналы уведомлений, пароль и 2FA у каждого свои. Если доступ есть
+к нескольким домам, панель группирует устройства по дому, а при создании устройства, сценария, моста или загрузке
+прошивки спрашивает, в какой дом. Сценарий работает только с устройствами своего дома.
+Убранный участник теряет доступ сразу, в том числе к живым данным по MQTT.
+
 ## Уведомления
 
 Действие сценария «Уведомить» всегда пишет в ленту панели, а в **Настройки → Куда присылать уведомления**
@@ -251,6 +268,10 @@ curl -s "$H/api/notifications?unread=true" -H "$A"
 | POST | `/api/auth/totp/setup`, `/api/auth/totp/enable`, `/api/auth/totp/disable`, `/api/auth/totp/recovery-codes` | 2FA |
 | GET | `/api/sessions` | сеансы; `DELETE /api/sessions/:id`, `POST /api/sessions/revoke-others` |
 | GET | `/api/me` | |
+| GET | `/api/homes` | дома, к которым есть доступ, и роль |
+| GET | `/api/members` | участники и приглашения моего дома; `PUT/DELETE /api/members/:userId` |
+| POST | `/api/invites` | `{role}` → ссылка; `DELETE /api/invites/:id`; `POST /api/invites/accept {code}` |
+|  | `home` | в `POST /api/devices`, `/api/scenarios`, `/api/bridges`, `/api/firmwares?home=` — id владельца дома |
 | GET, POST | `/api/devices` | список; создать → `claim_token` |
 | GET, PUT, DELETE | `/api/devices/:id` | PUT — переименовать |
 | POST | `/api/devices/:id/claim` | новый токен привязки (старая учётка перестаёт работать) |

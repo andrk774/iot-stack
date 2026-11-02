@@ -1,6 +1,7 @@
 import { h, mount, modal, field, copyText, toast } from '../dom.js';
 import { post } from '../api.js';
 import { store } from '../store.js';
+import { homeLabel, homeSelect, sharedMode, ROLE_LABELS } from '../access.js';
 import {
   deviceProps, coerce, formatValue, relativeTime, STATE_LABELS, stateTone, errorMessage,
 } from '../format.js';
@@ -49,12 +50,13 @@ export function showClaimToken(device, claim) {
 
 function addDeviceDialog() {
   const name = h('input', { name: 'name', required: true, maxlength: 64, placeholder: 'Например, «Теплица»', autocomplete: 'off' });
+  const home = homeSelect('admin');
   const submit = h('button', { class: 'btn btn-primary', value: 'ok' }, 'Создать');
-  const dlg = modal('Новое устройство', h('div', { class: 'stack' }, field('Название', name)), [submit]);
+  const dlg = modal('Новое устройство', h('div', { class: 'stack' }, field('Название', name), home ? field('Дом', home) : null), [submit]);
   dlg.addEventListener('close', async () => {
     if (dlg.returnValue !== 'ok' || !name.value.trim()) return;
     try {
-      const res = await post('/api/devices', { name: name.value.trim() });
+      const res = await post('/api/devices', { name: name.value.trim(), ...(home ? { home: home.value } : {}) });
       store.upsert(res.device);
       showClaimToken(res.device, res);
     } catch (e) {
@@ -75,7 +77,20 @@ export function renderDevices(root) {
         h('button', { class: 'btn btn-primary', type: 'button', onclick: addDeviceDialog }, 'Добавить устройство')));
       return;
     }
-    mount(list, ...devices.map(row));
+    if (!sharedMode()) { mount(list, ...devices.map(row)); return; }
+    // доступ к нескольким домам: группы по дому, свой — первым
+    const order = store.homes.map((x) => x.owner_id);
+    const groups = new Map(order.map((o) => [o, []]));
+    for (const d of devices) (groups.get(d.owner_id) || groups.set(d.owner_id, []).get(d.owner_id)).push(d);
+    const parts = [];
+    for (const [owner, ds] of groups) {
+      if (!ds.length) continue;
+      const role = store.homes.find((x) => x.owner_id === owner)?.role;
+      parts.push(h('h2', { class: 'group-title' }, homeLabel(owner),
+        role && role !== 'owner' ? h('span', { class: 'muted' }, ` · ${ROLE_LABELS[role]}`) : null));
+      parts.push(...ds.map(row));
+    }
+    mount(list, ...parts);
   };
 
   mount(root,

@@ -35,7 +35,57 @@ export function makeAuth(config, db) {
   return auth;
 }
 
-/** Проверить, что все устройства принадлежат пользователю. Возвращает Map id -> { id, meta } */
+// ---------- общий доступ («дом» владельца) ----------
+export const ROLE_RANK = { view: 1, control: 2, admin: 3, owner: 4 };
+export const MEMBER_ROLES = ['view', 'control', 'admin'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** SQL: роль пользователя (параметр u) в доме, которому принадлежит строка (колонка ownerCol); NULL — нет доступа */
+// ownerCol обязательно с алиасом таблицы (d.owner_id): без него внутри подзапроса owner_id
+// означал бы hm.owner_id, и условие было бы истинным для любого дома
+const qualified = (col) => {
+  if (!/^[a-z]\w*\.\w+$/.test(col)) throw new Error(`access SQL: column must be qualified, got ${col}`);
+  return col;
+};
+
+export const roleSql = (ownerCol, u) => qualified(ownerCol) &&
+  `(CASE WHEN ${ownerCol} = ${u} THEN 'owner' ELSE (SELECT hm.role FROM home_members hm WHERE hm.owner_id = ${ownerCol} AND hm.user_id = ${u}) END)`;
+
+/** SQL-условие: у пользователя u в доме строки роль не ниже min */
+export function accessSql(ownerCol, u, min = 'view') {
+  qualified(ownerCol);
+  const roles = MEMBER_ROLES.filter((r) => ROLE_RANK[r] >= ROLE_RANK[min]);
+  const member = roles.length
+    ? ` OR EXISTS (SELECT 1 FROM home_members hm WHERE hm.owner_id = ${ownerCol} AND hm.user_id = ${u} AND hm.role IN (${roles.map((r) => `'${r}'`).join(', ')}))`
+    : '';
+  return `(${ownerCol} = ${u}${member})`;
+}
+
+/** Есть доступ (role не NULL), но роли не хватает — 403; доступа нет вовсе — 404 с notFound */
+export function requireRole(role, min, notFound) {
+  if (!role) throw new HttpError(404, notFound);
+  if (ROLE_RANK[role] < ROLE_RANK[min]) throw new HttpError(403, 'forbidden', { need: min });
+}
+
+/** Роль пользователя в доме владельца ownerId или null */
+export async function roleIn(db, userId, ownerId) {
+  if (ownerId === userId) return 'owner';
+  const { rows } = await db.query('SELECT role FROM home_members WHERE owner_id = $1 AND user_id = $2', [ownerId, userId]);
+  return rows[0]?.role ?? null;
+}
+
+/**
+ * Дом, в котором создаётся ресурс: home из запроса (id владельца) или свой.
+ * Возвращает id владельца; нужна роль не ниже min.
+ */
+export async function resolveHome(db, userId, home, min = 'admin') {
+  if (home === undefined || home === null || home === '' || home === userId) return userId;
+  if (typeof home !== 'string' || !UUID_RE.test(home)) throw new HttpError(400, 'validation', { field: 'home', reason: 'uuid' });
+  requireRole(await roleIn(db, userId, home), min, 'home_not_found');
+  return home;
+}
+
+/** Проверить, что все устройства принадлежат дому ownerId. Возвращает Map id -> { id, meta } */
 export async function assertOwnDevices(db, userId, ids) {
   const unique = [...new Set(ids)];
   if (unique.length === 0) return new Map();

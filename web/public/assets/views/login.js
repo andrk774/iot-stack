@@ -2,6 +2,8 @@ import { h, mount, field } from '../dom.js';
 import { post, setToken } from '../api.js';
 import { errorMessage } from '../format.js';
 
+const pendingInvite = () => { try { return sessionStorage.getItem('iot.invite'); } catch { return null; } };
+
 export function renderLogin(root) {
   let mode = 'login';
   const email = h('input', { type: 'email', name: 'email', required: true, autocomplete: 'username', maxlength: 254 });
@@ -27,6 +29,7 @@ export function renderLogin(root) {
   const form = h('form', { class: 'auth-card' },
     h('div', { class: 'brand brand-large' }, h('span', { class: 'brand-mark', 'aria-hidden': 'true' }), 'Домашний IoT'),
     title,
+    pendingInvite() ? h('p', { class: 'invite-note' }, 'Вас пригласили в дом. Войдите или зарегистрируйтесь — доступ появится сразу.') : null,
     field('Email', email),
     field('Пароль', password, 'Не короче 8 символов'),
     codeField,
@@ -39,7 +42,10 @@ export function renderLogin(root) {
     try {
       const body = { email: email.value.trim(), password: password.value };
       if (mode === 'login' && !codeField.hidden) body.code = code.value.trim();
+      if (mode !== 'login' && pendingInvite()) body.invite = pendingInvite();
       const res = await post(mode === 'login' ? '/api/auth/login' : '/api/auth/register', body);
+      // при регистрации сервер уже принял приглашение
+      if (body.invite) { try { sessionStorage.removeItem('iot.invite'); } catch { /* ignore */ } }
       setToken(res.token);
     } catch (err) {
       if (err.code === 'totp_required') {
