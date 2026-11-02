@@ -45,6 +45,7 @@ export class Router {
   post(p, h, opts) { return this.add('POST', p, h, opts); }
   put(p, h) { return this.add('PUT', p, h); }
   delete(p, h) { return this.add('DELETE', p, h); }
+  head(p, h) { return this.add('HEAD', p, h); }
   use(other) {
     this.routes.push(...other.routes);
     return this;

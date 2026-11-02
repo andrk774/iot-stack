@@ -37,6 +37,13 @@ export function loadConfig(env = process.env) {
     webpushSubject: env.WEBPUSH_SUBJECT || `https://${required('PUBLIC_HOST')}`,
     // максимальный размер файла прошивки для OTA
     firmwareMaxBytes: Math.round(Number(env.FIRMWARE_MAX_MB || 4) * 1024 * 1024),
+    // Алиса (умный дом Яндекса): данные для связки аккаунтов и, по желанию, уведомлений о состоянии
+    yandex: {
+      clientId: env.YANDEX_CLIENT_ID || '',
+      clientSecret: env.YANDEX_CLIENT_SECRET || '',
+      skillId: env.YANDEX_SKILL_ID || '',
+      skillToken: env.YANDEX_SKILL_TOKEN || '',
+    },
     publicPort: 8000,
     internalPort: 8001,
   };

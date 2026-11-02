@@ -12,6 +12,7 @@ import { otaRoutes, handleOtaStatus } from '../src/routes/ota.js';
 import { accountRoutes } from '../src/routes/account.js';
 import { homeRoutes } from '../src/routes/homes.js';
 import { roomRoutes } from '../src/routes/rooms.js';
+import { yandexRoutes } from '../src/routes/yandex.js';
 import { createWebPush } from '../src/notify/webpush.js';
 import crypto from 'node:crypto';
 import { totpCode } from '../src/security.js';
@@ -38,6 +39,7 @@ const testSenders = {
   telegram: async (ch, n) => { testSent.push([ch.id, n.message]); },
 };
 const config = {
+  yandex: { clientId: 'yandex-alice', clientSecret: 's'.repeat(40) },
   firmwareMaxBytes: 64 * 1024,
   telegramBotToken: '1:x', webhookAllowPrivate: false,
   jwtSecret: 'j'.repeat(40), jwtTtlSec: 3600, allowRegistration: true, maxDevicesPerUser: 5, maxBridgeDevices: 3,
@@ -68,7 +70,7 @@ before(async () => {
   await migrate(db, { log: {} }); // повторно — ничего не делает
   const mqtt = mqttFake;
   const webpush = await createWebPush({ db, subject: 'https://iot.test', log: {} });
-  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(homeRoutes({ db, config, emqx })).use(roomRoutes({ db, config })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
+  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(homeRoutes({ db, config, emqx })).use(roomRoutes({ db, config })).use(yandexRoutes({ db, mqtt: mqttFake, config, log: {} })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
     .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' }, webpush }))
     .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
@@ -633,4 +635,59 @@ test('bridge devices deleted by user stay hidden; tasmota/shelly configs', { ski
   await call(apiUrl, 'DELETE', `/api/devices/${plain.id}`, null, auth);
   const { rows } = await db.query('SELECT count(*)::int AS n FROM bridge_ignored');
   assert.equal(rows[0].n, 0);
+});
+
+test('Alice: OAuth account linking and smart home API on real SQL', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'alice@x.ru', password: 'password123' });
+  const auth = `Bearer ${reg.body.token}`;
+  const dev = (await call(apiUrl, 'POST', '/api/devices', { name: 'Розетка' }, auth)).body.device;
+  await call(apiUrl, 'POST', '/api/provision', { claim_token: (await call(apiUrl, 'POST', `/api/devices/${dev.id}/claim`, {}, auth)).body.claim_token });
+  await db.query(`UPDATE devices SET state = 'ready', meta = $2::jsonb, last_values = $3::jsonb WHERE id = $1`, [dev.id,
+    JSON.stringify({ props: { power: { type: 'boolean', settable: true }, energy_power: { type: 'float', unit: 'W' } } }),
+    JSON.stringify({ power: false, energy_power: 0 })]);
+  const redirect = 'https://social.yandex.net/broker/redirect';
+
+  // шаг 1: Яндекс -> /oauth/authorize -> панель
+  const a1 = await fetch(`${apiUrl}/oauth/authorize?response_type=code&client_id=yandex-alice&redirect_uri=${encodeURIComponent(redirect)}&state=xyz`, { redirect: 'manual' });
+  assert.equal(a1.status, 302);
+  assert.match(a1.headers.get('location'), /^\/#\/oauth\?client_id=yandex-alice&redirect_uri=/);
+  assert.equal((await fetch(`${apiUrl}/oauth/authorize?response_type=code&client_id=yandex-alice&redirect_uri=${encodeURIComponent('https://evil.com/cb')}`, { redirect: 'manual' })).status, 400);
+  // шаг 2: согласие пользователя
+  const consent = await call(apiUrl, 'POST', '/api/oauth/authorize', { client_id: 'yandex-alice', redirect_uri: redirect, state: 'xyz' }, auth);
+  const back = new URL(consent.body.redirect);
+  assert.equal(back.origin + back.pathname, redirect);
+  assert.equal(back.searchParams.get('state'), 'xyz');
+  const code = back.searchParams.get('code');
+  // шаг 3: обмен кода (form-urlencoded, секрет в Basic)
+  const token = (form, basic = true) => fetch(`${apiUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...(basic ? { authorization: `Basic ${Buffer.from(`yandex-alice:${'s'.repeat(40)}`).toString('base64')}` } : {}) },
+    body: new URLSearchParams(form).toString(),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  assert.equal((await token({ grant_type: 'authorization_code', code, client_id: 'yandex-alice', client_secret: 'wrong' }, false)).status, 401);
+  const t1 = await token({ grant_type: 'authorization_code', code, redirect_uri: redirect });
+  assert.equal(t1.status, 200);
+  assert.equal(t1.body.token_type, 'bearer');
+  assert.equal((await token({ grant_type: 'authorization_code', code })).body.error, 'invalid_grant'); // код одноразовый
+  const t2 = await token({ grant_type: 'refresh_token', refresh_token: t1.body.refresh_token });
+  assert.equal(t2.status, 200);
+  assert.equal((await token({ grant_type: 'refresh_token', refresh_token: t1.body.refresh_token })).body.error, 'invalid_grant');
+
+  const Y = (method, path, body, tok = t2.body.access_token) => call(apiUrl, method, `/yandex/v1.0${path}`, body, `Bearer ${tok}`);
+  assert.equal((await Y('GET', '/user/devices', null, t1.body.access_token)).status, 401); // старый токен отозван при обновлении
+  const list = await Y('GET', '/user/devices');
+  assert.equal(list.body.payload.user_id, reg.body.user.id);
+  assert.deepEqual(list.body.payload.devices.map((d) => [d.id, d.type]), [[dev.id, 'devices.types.socket']]);
+  const q = await Y('POST', '/user/devices/query', { devices: [{ id: dev.id }, { id: 'dffffffffffffffff' }] });
+  assert.deepEqual(q.body.payload.devices[0].capabilities, [{ type: 'devices.capabilities.on_off', state: { instance: 'on', value: false } }]);
+  assert.equal(q.body.payload.devices[1].error_code, 'DEVICE_NOT_FOUND');
+  published.length = 0;
+  const act = await Y('POST', '/user/devices/action', { payload: { devices: [{ id: dev.id, capabilities: [{ type: 'devices.capabilities.on_off', state: { instance: 'on', value: true } }] }] } });
+  assert.equal(act.body.payload.devices[0].capabilities[0].state.action_result.status, 'DONE');
+  assert.deepEqual(published.at(-1).slice(0, 2), [`dev/${dev.id}/power/set`, 'true']);
+  await db.query(`UPDATE devices SET state = 'lost' WHERE id = $1`, [dev.id]);
+  assert.equal((await Y('POST', '/user/devices/query', { devices: [{ id: dev.id }] })).body.payload.devices[0].error_code, 'DEVICE_UNREACHABLE');
+  assert.equal((await call(apiUrl, 'GET', '/api/oauth/links', null, auth)).body.links.length, 1);
+  assert.equal((await Y('POST', '/user/unlink', {})).status, 200);
+  assert.equal((await Y('GET', '/user/devices')).status, 401);
 });

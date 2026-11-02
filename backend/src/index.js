@@ -17,6 +17,8 @@ import { otaRoutes, handleOtaStatus } from './routes/ota.js';
 import { accountRoutes } from './routes/account.js';
 import { homeRoutes } from './routes/homes.js';
 import { roomRoutes } from './routes/rooms.js';
+import { yandexRoutes } from './routes/yandex.js';
+import { YandexNotifier } from './yandex/notify.js';
 
 const config = loadConfig();
 
@@ -46,8 +48,13 @@ const mqttClient = mqttLib.connect(config.mqttUrl, {
   reconnectPeriod: 3000,
   connectTimeout: 10_000,
 });
+const yandexNotifier = new YandexNotifier({ db, skillId: config.yandex.skillId, token: config.yandex.skillToken, clientId: config.yandex.clientId });
+
 mqttClient.on('connect', async () => {
   console.log('mqtt connected');
+  if (yandexNotifier.enabled) {
+    await mqttClient.subscribeAsync('$share/yandex/dev/+/+', { qos: 0 }).catch((e) => console.error('subscribe failed', e.message));
+  }
   // статусы OTA от устройств; $share — при нескольких репликах сообщение получит одна
   await mqttClient.subscribeAsync('$share/backend/dev/+/$ota', { qos: 1 }).catch((e) => console.error('subscribe failed', e.message));
 });
@@ -55,6 +62,8 @@ mqttClient.on('message', (topic, payload) => {
   const parts = topic.split('/');
   if (parts.length === 3 && parts[0] === 'dev' && parts[2] === '$ota') {
     handleOtaStatus({ db, mqtt }, parts[1], payload).catch((e) => console.error('ota status', e.message));
+  } else if (parts.length === 3 && parts[0] === 'dev' && parts[2] !== '$meta') {
+    yandexNotifier.touch(parts[1]);
   }
 });
 mqttClient.on('error', (e) => console.error('mqtt error', e.message));
@@ -111,6 +120,7 @@ const api = new Router()
   .use(accountRoutes({ db, config, emqx }))
   .use(homeRoutes({ db, config, emqx }))
   .use(roomRoutes({ db, config }))
+  .use(yandexRoutes({ db, mqtt, config }))
   .use(publicRoutes({ db, mqtt, config, emqx }))
   .use(scenarioRoutes({ db, config }))
   .use(bridgeRoutes({ db, config, emqx }))
