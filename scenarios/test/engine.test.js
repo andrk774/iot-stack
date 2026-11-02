@@ -129,3 +129,86 @@ test('set action respects settable from current $meta', async () => {
   await Promise.all(engine.runManual('s7'));
   assert.equal(calls.set.length, 2);
 });
+
+// ---------- пороги, длительность, «нет данных», условия ----------
+const runs = (calls) => calls.runs.map(([id]) => id);
+
+test('hysteresis: no chatter around the threshold', async () => {
+  const s = { ...hot, id: 'h', conditions: [], actions: [{ type: 'notify', message: 'x' }], trigger: { ...hot.trigger, hysteresis: 2 } };
+  const { engine, calls } = setup([s]);
+  await Promise.all(engine.onValue(T, 'temperature', '30.5'));
+  await Promise.all(engine.onValue(T, 'temperature', '29.5')); // ниже порога, но не на 2 градуса
+  await Promise.all(engine.onValue(T, 'temperature', '30.4'));
+  assert.deepEqual(runs(calls), ['h']);
+  await Promise.all(engine.onValue(T, 'temperature', '27.9')); // ушло на гистерезис — взвелось
+  await Promise.all(engine.onValue(T, 'temperature', '31'));
+  assert.deepEqual(runs(calls), ['h', 'h']);
+  // для «меньше» — наоборот
+  const cold = { ...s, id: 'c', trigger: { type: 'property', device_id: T, property: 'temperature', op: 'lt', value: 10, hysteresis: 1 } };
+  const e2 = setup([cold]);
+  for (const v of ['9', '10.5', '9', '11.2', '9']) await Promise.all(e2.engine.onValue(T, 'temperature', v));
+  assert.deepEqual(runs(e2.calls), ['c', 'c']);
+});
+
+test('for_sec: fires only if condition holds long enough', async () => {
+  const s = { ...hot, id: 'f', conditions: [], actions: [{ type: 'notify', level: 'info', message: '{value}' }], trigger: { ...hot.trigger, for_sec: 60 } };
+  const { engine, calls, advance } = setup([s]);
+  engine.onValue(T, 'temperature', '31');
+  advance(30_000);
+  await Promise.all(engine.poll());
+  engine.onValue(T, 'temperature', '29'); // прервалось
+  advance(40_000);
+  await Promise.all(engine.poll());
+  assert.deepEqual(runs(calls), []);
+  engine.onValue(T, 'temperature', '32');
+  advance(30_000);
+  engine.onValue(T, 'temperature', '33'); // всё ещё выше — отсчёт не сбрасывается
+  advance(31_000);
+  await Promise.all(engine.poll());
+  assert.deepEqual(runs(calls), ['f']);
+  assert.deepEqual(calls.notify.at(-1), ['f', 'info', '33']);
+  advance(120_000);
+  await Promise.all(engine.poll()); // повторно — только после возврата ниже порога
+  assert.deepEqual(runs(calls), ['f']);
+});
+
+test('stale: no data for N minutes fires once until data returns', async () => {
+  const s = { id: 'st', name: 'Тишина', enabled: true, cooldown_sec: 0, trigger: { type: 'stale', device_id: T, minutes: 10 }, conditions: [], actions: [{ type: 'notify', message: '{device} молчит {value} мин' }] };
+  const p = { ...s, id: 'sp', trigger: { type: 'stale', device_id: T, property: 'humidity', minutes: 5 } };
+  const { engine, calls, advance } = setup([s, p]);
+  advance(4 * 60_000);
+  engine.onValue(T, 'temperature', '25');
+  advance(6 * 60_000);
+  await Promise.all(engine.poll());
+  assert.deepEqual(runs(calls), ['sp']); // humidity не приходила ни разу
+  advance(5 * 60_000);
+  await Promise.all(engine.poll());
+  await Promise.all(engine.poll());
+  assert.deepEqual(runs(calls), ['sp', 'st']);
+  assert.equal(calls.notify.at(-1)[2], 'Теплица молчит 10 мин');
+  engine.onValue(T, 'temperature', '25'); // данные вернулись — взвелось
+  advance(11 * 60_000);
+  await Promise.all(engine.poll());
+  assert.deepEqual(runs(calls), ['sp', 'st', 'st']);
+});
+
+test('conditions: any/all, device state, time window across midnight', async () => {
+  const base = { id: 'm', name: 'M', enabled: true, cooldown_sec: 0, trigger: { type: 'manual' }, actions: [{ type: 'notify', message: 'x' }] };
+  const night = { type: 'time', from: '22:00', to: '07:00' };
+  // 1_000_000 мс = 00:16:40 UTC четверга 1 января 1970
+  const s1 = { ...base, id: 'all', conditions: [night, { type: 'state', device_id: R, state: 'ready' }] };
+  const s2 = { ...base, id: 'any', condition_mode: 'any', conditions: [{ type: 'time', from: '08:00', to: '20:00' }, { type: 'state', device_id: R, state: 'lost' }] };
+  const s3 = { ...base, id: 'days', conditions: [{ type: 'time', from: '22:00', to: '07:00', days: [3] }] }; // ночь со среды на четверг
+  const s4 = { ...base, id: 'neg', conditions: [{ type: 'state', device_id: R, state: 'ready', negate: true }] };
+  const { engine } = setup([s1, s2, s3, s4]);
+  assert.equal(engine.conditionsHold(s1), true);
+  assert.equal(engine.conditionsHold(s2), false);
+  assert.equal(engine.conditionsHold(s3), true);
+  assert.equal(engine.conditionsHold({ ...s3, conditions: [{ ...s3.conditions[0], days: [4] }] }), false);
+  assert.equal(engine.conditionsHold(s4), false);
+  engine.onState(R, 'lost');
+  assert.equal(engine.conditionsHold(s2), true);
+  assert.equal(engine.conditionsHold(s1), false);
+  assert.equal(engine.conditionsHold(s4), true);
+  assert.equal(engine.conditionsHold({ ...base, conditions: [] }), true);
+});

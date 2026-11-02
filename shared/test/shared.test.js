@@ -81,3 +81,37 @@ test('validateScenario: rejects bad input', () => {
     assert.throws(() => validateScenario(input), (e) => e instanceof ScenarioError && e.field === field, field);
   }
 });
+
+test('scenario: hysteresis, for_sec, stale, condition types and mode', async () => {
+  const { validateScenario, ScenarioError, inTimeWindow } = await import('../scenario.js');
+  const D = 'd0123456789abcdef';
+  const base = { name: 'x', actions: [{ type: 'notify', message: 'm' }] };
+  const ok = (o) => validateScenario({ ...base, ...o });
+  const bad = (o, field) => assert.throws(() => ok(o), (e) => e instanceof ScenarioError && e.field === field);
+  const prop = { type: 'property', device_id: D, property: 't', op: 'gt', value: 30 };
+  assert.equal(ok({ trigger: { ...prop, hysteresis: 1.5, for_sec: 300 } }).trigger.for_sec, 300);
+  bad({ trigger: { ...prop, op: 'eq', hysteresis: 1 } }, 'trigger.hysteresis');
+  bad({ trigger: { ...prop, hysteresis: -1 } }, 'trigger.hysteresis');
+  bad({ trigger: { ...prop, op: 'changed', value: undefined, for_sec: 5 } }, 'trigger.for_sec');
+  bad({ trigger: { ...prop, for_sec: 1.5 } }, 'trigger.for_sec');
+  assert.deepEqual(ok({ trigger: { type: 'stale', device_id: D, minutes: 30 } }).trigger, { type: 'stale', device_id: D, minutes: 30 });
+  bad({ trigger: { type: 'stale', device_id: D, minutes: 0 } }, 'trigger.minutes');
+  const m = { type: 'manual' };
+  const s = ok({ trigger: m, condition_mode: 'any', conditions: [{ device_id: D, property: 'a', op: 'eq', value: 1 }, { type: 'state', device_id: D, state: 'lost', negate: true }, { type: 'time', from: '22:00', to: '07:00', days: [5, 6, 0] }] });
+  assert.equal(s.condition_mode, 'any');
+  assert.equal(s.conditions[0].type, 'property'); // старые условия без type — сравнение
+  assert.deepEqual(s.conditions[2].days, [0, 5, 6]);
+  bad({ trigger: m, condition_mode: 'some' }, 'condition_mode');
+  bad({ trigger: m, conditions: [{ type: 'time', from: '24:00', to: '07:00' }] }, 'conditions[0].from');
+  bad({ trigger: m, conditions: [{ type: 'time', from: '22:00', to: '07:00', days: [7] }] }, 'conditions[0].days');
+  bad({ trigger: m, conditions: [{ type: 'state', device_id: D, state: 'weird' }] }, 'conditions[0].state');
+  bad({ trigger: m, conditions: [{ type: 'moon' }] }, 'conditions[0].type');
+  // окно через полночь: день — тот, когда окно началось
+  const w = { from: '22:00', to: '07:00', days: [5] }; // ночь с пятницы на субботу
+  assert.equal(inTimeWindow(w, { hour: 23, minute: 0, weekday: 5 }), true);
+  assert.equal(inTimeWindow(w, { hour: 3, minute: 0, weekday: 6 }), true);
+  assert.equal(inTimeWindow(w, { hour: 3, minute: 0, weekday: 5 }), false);
+  assert.equal(inTimeWindow(w, { hour: 12, minute: 0, weekday: 5 }), false);
+  assert.equal(inTimeWindow({ from: '08:00', to: '20:00' }, { hour: 20, minute: 0, weekday: 1 }), false);
+  assert.equal(inTimeWindow({ from: '00:00', to: '00:00' }, { hour: 13, minute: 7, weekday: 1 }), true);
+});

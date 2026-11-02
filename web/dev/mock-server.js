@@ -43,6 +43,17 @@ const devices = new Map([
   }],
 ]);
 const scenarios = new Map([
+  ['s-night', {
+    id: 's-night', name: 'Ночью жарко в теплице', enabled: true, cooldown_sec: 600, condition_mode: 'any', last_run_at: null, last_error: null,
+    trigger: { type: 'property', device_id: 'd1a2b3c4d5e6f7081', property: 'temperature', op: 'gt', value: 30, for_sec: 300, hysteresis: 2 },
+    conditions: [{ type: 'time', from: '22:00', to: '07:00', days: [1, 2, 3, 4, 5], tz: 'Asia/Yekaterinburg' }, { type: 'state', device_id: 'd9f8e7d6c5b4a3920', state: 'lost', negate: true }],
+    actions: [{ type: 'notify', level: 'warning', message: '{device}: {value} °C' }],
+  }],
+  ['s-stale', {
+    id: 's-stale', name: 'Датчик молчит', enabled: true, cooldown_sec: 0, last_run_at: null, last_error: null,
+    trigger: { type: 'stale', device_id: 'd1a2b3c4d5e6f7081', property: 'humidity', minutes: 60 }, conditions: [],
+    actions: [{ type: 'notify', level: 'alert', message: '{device} не присылает данные' }],
+  }],
   ['3d9a7c1e-0000-4000-8000-000000000001', {
     id: '3d9a7c1e-0000-4000-8000-000000000001', name: 'Проветрить теплицу', enabled: true, cooldown_sec: 300,
     trigger: { type: 'property', device_id: 'd1a2b3c4d5e6f7081', property: 'temperature', op: 'gt', value: 30 },

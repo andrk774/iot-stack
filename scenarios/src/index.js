@@ -38,16 +38,16 @@ const engine = new Engine({
 
 async function reload() {
   const { rows: scenarios } = await db.query(
-    'SELECT id, owner_id, name, enabled, trigger, conditions, actions, cooldown_sec, last_run_at FROM scenarios WHERE enabled',
+    'SELECT id, owner_id, name, enabled, trigger, conditions, condition_mode, actions, cooldown_sec, last_run_at FROM scenarios WHERE enabled',
   );
   const ids = new Set();
   for (const s of scenarios) {
     if (s.trigger?.device_id) ids.add(s.trigger.device_id);
-    for (const c of s.conditions || []) ids.add(c.device_id);
+    for (const c of s.conditions || []) if (c.device_id) ids.add(c.device_id);
     for (const a of s.actions || []) if (a.device_id) ids.add(a.device_id);
   }
   const { rows: devices } = ids.size
-    ? await db.query('SELECT id, name, state, meta, last_values FROM devices WHERE id = ANY($1::text[])', [[...ids]])
+    ? await db.query('SELECT id, name, state, meta, last_values, last_seen FROM devices WHERE id = ANY($1::text[])', [[...ids]])
     : { rows: [] };
   engine.load(scenarios, devices);
   console.log(`loaded ${scenarios.length} scenarios, watching ${devices.length} devices`);
@@ -114,6 +114,8 @@ function startTicker() {
 }
 
 await reload().catch((e) => console.error('initial load failed', e.message));
+// «дольше N секунд» и «нет данных N минут»
+setInterval(() => Promise.all(engine.poll()).catch((e) => console.error('poll failed', e.message)), 5000);
 await listen().catch((e) => console.error('listen failed', e.message));
 setInterval(scheduleReload, 5 * 60_000);
 startTicker();

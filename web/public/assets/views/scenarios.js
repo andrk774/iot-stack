@@ -21,15 +21,19 @@ const browserTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().
 let editorHome = null;
 
 const devName = (id) => store.devices.get(id)?.name || 'удалённое устройство';
+const fmtDuration = (sec) => (sec % 3600 === 0 ? `${sec / 3600} ч` : sec % 60 === 0 ? `${sec / 60} мин` : `${sec} с`);
+const DAY_NAMES = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
 const fmtVal = (v) => (v === true ? 'вкл' : v === false ? 'выкл' : String(v));
 
 export function describeTrigger(t) {
   if (!t) return '';
   if (t.type === 'property') {
-    return t.op === 'changed'
-      ? `когда ${devName(t.device_id)} · ${t.property} изменилось`
-      : `когда ${devName(t.device_id)} · ${t.property} ${OP_LABELS[t.op]} ${fmtVal(t.value)}`;
+    if (t.op === 'changed') return `когда ${devName(t.device_id)} · ${t.property} изменилось`;
+    return `когда ${devName(t.device_id)} · ${t.property} ${OP_LABELS[t.op]} ${fmtVal(t.value)}`
+      + (t.for_sec ? ` дольше ${fmtDuration(t.for_sec)}` : '')
+      + (t.hysteresis ? ` (гистерезис ${t.hysteresis})` : '');
   }
+  if (t.type === 'stale') return `когда от ${devName(t.device_id)}${t.property ? ` · ${t.property}` : ''} нет данных ${t.minutes} мин`;
   if (t.type === 'state') return `когда ${devName(t.device_id)}: ${STATES[t.state] || t.state}`;
   if (t.type === 'schedule') {
     const preset = CRON_PRESETS.find(([c]) => c === t.cron);
@@ -174,7 +178,7 @@ export function renderScenarioEditor(root, { id }) {
   const readOnlyNote = h('p', { class: 'role-note', hidden: true }, 'У вас доступ только на просмотр этого сценария.');
   const buttons = h('div', { class: 'row-actions' });
   let s = {
-    name: '', enabled: true, cooldown_sec: 0,
+    name: '', enabled: true, cooldown_sec: 0, condition_mode: 'all',
     trigger: { type: 'property', op: 'gt' },
     conditions: [],
     actions: [{ type: 'set' }],
@@ -192,18 +196,51 @@ export function renderScenarioEditor(root, { id }) {
     const typeSel = h('select', { 'aria-label': 'Тип запуска' },
       h('option', { value: 'property' }, 'Значение свойства'),
       h('option', { value: 'state' }, 'Состояние устройства'),
+      h('option', { value: 'stale' }, 'Нет данных'),
       h('option', { value: 'schedule' }, 'Расписание'),
       h('option', { value: 'manual' }, 'Только вручную'));
     typeSel.value = t.type;
     typeSel.addEventListener('change', () => {
       s.trigger = { type: typeSel.value, ...(typeSel.value === 'property' ? { op: 'gt' } : {}),
         ...(typeSel.value === 'state' ? { state: 'lost' } : {}),
+        ...(typeSel.value === 'stale' ? { minutes: 30 } : {}),
         ...(typeSel.value === 'schedule' ? { cron: '0 7 * * *', tz: browserTz } : {}) };
       drawTrigger();
     });
 
     let body = null;
-    if (t.type === 'property') body = comparisonRow(t, drawTrigger, { allowChanged: true });
+    if (t.type === 'property') {
+      const threshold = ['gt', 'gte', 'lt', 'lte'].includes(t.op);
+      const forIn = h('input', { type: 'number', min: 0, max: 1440, step: 1, value: t.for_sec ? Math.round(t.for_sec / 60) : '', placeholder: '0', 'aria-label': 'Минут подряд', style: { width: '7em' } });
+      forIn.addEventListener('input', () => { const m = Number(forIn.value); t.for_sec = m > 0 ? Math.round(m * 60) : undefined; });
+      const hyst = h('input', { type: 'number', min: 0, step: 'any', value: t.hysteresis ?? '', placeholder: '0', 'aria-label': 'Гистерезис', style: { width: '7em' } });
+      hyst.addEventListener('input', () => { const v = Number(hyst.value); t.hysteresis = hyst.value.trim() && v > 0 ? v : undefined; });
+      if (!threshold) { delete t.hysteresis; }
+      if (t.op === 'changed') { delete t.for_sec; }
+      body = h('div', { class: 'stack' },
+        comparisonRow(t, drawTrigger, { allowChanged: true }),
+        t.op === 'changed' ? null : h('div', { class: 'rule-fields' },
+          h('span', null, 'держится дольше'), forIn, h('span', null, 'мин'),
+          threshold ? h('span', null, ' · гистерезис') : null, threshold ? hyst : null),
+        t.op === 'changed' ? null : h('p', { class: 'field-hint' },
+          'Дольше N минут — чтобы кратковременный скачок не запускал сценарий. Гистерезис — повторный запуск только после того, как значение отойдёт от порога на эту величину (порог 30 и гистерезис 2: снова сработает, когда упадёт ниже 28 и опять превысит 30).'));
+    }
+    if (t.type === 'stale') {
+      const min = h('input', { type: 'number', min: 1, max: 10080, step: 1, value: t.minutes ?? 30, 'aria-label': 'Минут', style: { width: '7em' } });
+      min.addEventListener('input', () => { t.minutes = Math.round(Number(min.value)) || undefined; });
+      const props = () => {
+        const d = store.devices.get(t.device_id);
+        const sel = h('select', { 'aria-label': 'Свойство' }, h('option', { value: '' }, 'любые данные'),
+          ...(d ? deviceProps(d) : []).map((p) => h('option', { value: p.name }, p.name)));
+        sel.value = t.property || '';
+        sel.addEventListener('change', () => { t.property = sel.value || undefined; });
+        return sel;
+      };
+      body = h('div', { class: 'stack' },
+        h('div', { class: 'rule-fields' }, h('span', null, 'от'), deviceSelect(t.device_id, (v) => { t.device_id = v; t.property = undefined; drawTrigger(); }), props(),
+          h('span', null, 'нет данных'), min, h('span', null, 'мин')),
+        h('p', { class: 'field-hint' }, 'Срабатывает один раз; снова — после того, как данные появятся и опять пропадут. Удобно для датчиков на батарейках, которые «тихо» разрядились.'));
+    }
     if (t.type === 'state') {
       const st = h('select', { 'aria-label': 'Состояние' }, ...Object.entries(STATES).map(([k, l]) => h('option', { value: k }, l)));
       st.value = t.state || 'lost';
@@ -226,14 +263,65 @@ export function renderScenarioEditor(root, { id }) {
     mount(triggerHost, h('div', { class: 'rule' }, h('div', { class: 'rule-fields' }, typeSel), body));
   };
 
+  const conditionBody = (c) => {
+    const type = c.type || 'property';
+    if (type === 'state') {
+      const st = h('select', { 'aria-label': 'Состояние' }, ...Object.entries(STATES).map(([k, l]) => h('option', { value: k }, l)));
+      st.value = c.state || 'ready';
+      c.state = st.value;
+      st.addEventListener('change', () => { c.state = st.value; });
+      const neg = h('select', { 'aria-label': 'Есть или нет' }, h('option', { value: '' }, 'в состоянии'), h('option', { value: '1' }, 'не в состоянии'));
+      neg.value = c.negate ? '1' : '';
+      neg.addEventListener('change', () => { c.negate = neg.value === '1' || undefined; });
+      return h('div', { class: 'rule-fields' }, deviceSelect(c.device_id, (v) => { c.device_id = v; }), neg, st);
+    }
+    if (type === 'time') {
+      const from = h('input', { type: 'time', value: c.from || '22:00', 'aria-label': 'С' });
+      const to = h('input', { type: 'time', value: c.to || '07:00', 'aria-label': 'До' });
+      c.from = from.value; c.to = to.value;
+      from.addEventListener('input', () => { c.from = from.value; });
+      to.addEventListener('input', () => { c.to = to.value; });
+      c.tz = c.tz || browserTz;
+      const days = h('div', { class: 'days', role: 'group', 'aria-label': 'Дни недели' },
+        ...[1, 2, 3, 4, 5, 6, 0].map((d) => {
+          const on = !c.days || c.days.includes(d);
+          const b = h('button', { type: 'button', class: `day${on ? ' is-on' : ''}`, 'aria-pressed': String(on) }, DAY_NAMES[d]);
+          b.addEventListener('click', () => {
+            const cur = c.days ? [...c.days] : [0, 1, 2, 3, 4, 5, 6];
+            const next = cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d];
+            c.days = next.length === 7 || next.length === 0 ? undefined : next;
+            drawConditions();
+          });
+          return b;
+        }));
+      return h('div', { class: 'rule-fields' }, h('span', null, 'время с'), from, h('span', null, 'до'), to, days);
+    }
+    return comparisonRow(c, drawConditions, { allowChanged: false });
+  };
+
   const drawConditions = () => {
+    const mode = h('select', { 'aria-label': 'Как сочетать условия' },
+      h('option', { value: 'all' }, 'все условия'), h('option', { value: 'any' }, 'хотя бы одно'));
+    mode.value = s.condition_mode || 'all';
+    mode.addEventListener('change', () => { s.condition_mode = mode.value; drawConditions(); });
+    const joiner = (s.condition_mode || 'all') === 'any' ? 'или' : 'и';
     mount(condHost,
-      ...s.conditions.map((c, i) => h('div', { class: 'rule' },
-        h('div', { class: 'rule-head' }, h('span', { class: 'rule-title' }, 'и при этом'),
-          h('button', { class: 'btn btn-small', type: 'button', onclick: () => { s.conditions.splice(i, 1); drawConditions(); } }, 'Убрать')),
-        comparisonRow(c, drawConditions, { allowChanged: false }))),
+      s.conditions.length > 1 ? h('div', { class: 'rule-fields' }, h('span', null, 'Запускать, если выполнены'), mode) : null,
+      ...s.conditions.map((c, i) => {
+        const typeSel = h('select', { 'aria-label': 'Вид условия' },
+          h('option', { value: 'property' }, 'значение'), h('option', { value: 'state' }, 'состояние'), h('option', { value: 'time' }, 'время'));
+        typeSel.value = c.type || 'property';
+        typeSel.addEventListener('change', () => {
+          s.conditions[i] = typeSel.value === 'property' ? { type: 'property', op: 'eq' } : { type: typeSel.value };
+          drawConditions();
+        });
+        return h('div', { class: 'rule' },
+          h('div', { class: 'rule-head' }, h('span', { class: 'rule-title' }, i === 0 ? 'при условии' : joiner), typeSel,
+            h('button', { class: 'btn btn-small', type: 'button', onclick: () => { s.conditions.splice(i, 1); drawConditions(); } }, 'Убрать')),
+          conditionBody(c));
+      }),
       s.conditions.length < 10
-        ? h('button', { class: 'btn btn-small', type: 'button', onclick: () => { s.conditions.push({ op: 'eq' }); drawConditions(); } }, 'Добавить условие')
+        ? h('button', { class: 'btn btn-small', type: 'button', onclick: () => { s.conditions.push({ type: 'property', op: 'eq' }); drawConditions(); } }, 'Добавить условие')
         : null);
   };
 

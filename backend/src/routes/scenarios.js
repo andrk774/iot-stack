@@ -3,7 +3,7 @@ import { makeAuth, assertOwnDevices, withTx, lockScope, roleSql, accessSql, requ
 import { validateScenario, referencedDevices, ScenarioError, isSettable } from '../../../shared/scenario.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const COLUMNS = 'id, owner_id, name, enabled, trigger, conditions, actions, cooldown_sec, last_run_at, last_error, created_at, updated_at';
+const COLUMNS = 'id, owner_id, name, enabled, trigger, conditions, condition_mode, actions, cooldown_sec, last_run_at, last_error, created_at, updated_at';
 const MAX_SCENARIOS = 200;
 
 export function scenarioRoutes({ db, config }) {
@@ -38,7 +38,7 @@ export function scenarioRoutes({ db, config }) {
   };
 
   const params = (s) => [s.name, s.enabled, JSON.stringify(s.trigger), JSON.stringify(s.conditions),
-    JSON.stringify(s.actions), s.cooldown_sec];
+    JSON.stringify(s.actions), s.cooldown_sec, s.condition_mode];
 
   r.get('/api/scenarios', async ({ req }) => {
     const userId = await auth(req);
@@ -57,8 +57,8 @@ export function scenarioRoutes({ db, config }) {
       const { rows: cnt } = await tx.query('SELECT count(*)::int AS n FROM scenarios WHERE owner_id = $1', [home]);
       if (cnt[0].n >= MAX_SCENARIOS) throw new HttpError(409, 'scenario_limit_reached');
       const { rows } = await tx.query(
-        `INSERT INTO scenarios (owner_id, name, enabled, trigger, conditions, actions, cooldown_sec)
-         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7) RETURNING ${COLUMNS}`,
+        `INSERT INTO scenarios (owner_id, name, enabled, trigger, conditions, actions, cooldown_sec, condition_mode)
+         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8) RETURNING ${COLUMNS}`,
         [home, ...params(s)],
       );
       return { ...rows[0], my_role: home === userId ? 'owner' : 'admin' };
@@ -74,7 +74,7 @@ export function scenarioRoutes({ db, config }) {
     const s = await parse(cur.owner_id, body);
     const { rows } = await db.query(
       `UPDATE scenarios SET name = $2, enabled = $3, trigger = $4::jsonb, conditions = $5::jsonb, actions = $6::jsonb,
-              cooldown_sec = $7, last_error = NULL, updated_at = now()
+              cooldown_sec = $7, condition_mode = $8, last_error = NULL, updated_at = now()
        WHERE id = $1 RETURNING ${COLUMNS}`,
       [p.id, ...params(s)],
     );
