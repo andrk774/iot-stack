@@ -20,7 +20,7 @@ const devices = new Map([
     last_values: { temperature: 54.5, heating: true },
   }],
   ['d1a2b3c4d5e6f7081', {
-    id: 'd1a2b3c4d5e6f7081', name: 'Теплица', state: 'ready', provisioned: true, bridge_id: null, created_at: ago(86400 * 20), last_seen: ago(4),
+    id: 'd1a2b3c4d5e6f7081', room_id: 'r-green', name: 'Теплица', state: 'ready', provisioned: true, bridge_id: null, created_at: ago(86400 * 20), last_seen: ago(4),
     meta: { name: 'Теплица', fw: '1.2.0', props: {
       temperature: { type: 'float', unit: '°C' }, humidity: { type: 'float', unit: '%' },
       target: { type: 'float', unit: '°C', settable: true, min: 5, max: 30 },
@@ -29,7 +29,7 @@ const devices = new Map([
     last_values: { temperature: 24.6, humidity: 61, target: 22, heater: 0, mode: 'heat' },
   }],
   ['d9f8e7d6c5b4a3920', {
-    id: 'd9f8e7d6c5b4a3920', name: 'Котельная', state: 'lost', provisioned: true, bridge_id: null, created_at: ago(86400 * 40), last_seen: ago(3600 * 5),
+    id: 'd9f8e7d6c5b4a3920', room_id: 'r-boiler', name: 'Котельная', state: 'lost', provisioned: true, bridge_id: null, created_at: ago(86400 * 40), last_seen: ago(3600 * 5),
     meta: { name: 'Котельная', fw: '0.9.1', props: { water_temp: { type: 'float', unit: '°C' }, pump: { type: 'boolean', settable: true }, rssi: { type: 'integer', unit: 'dBm' } } },
     last_values: { water_temp: 58.2, pump: 1, rssi: -71 },
   }],
@@ -155,6 +155,16 @@ function telemetry(id, q) {
 }
 
 const totp = { enabled: false };
+const rooms = [
+  { id: 'r-green', owner_id: '6f1c2b3a-1111-4222-8333-944455556666', name: 'Теплица', sort: 0 },
+  { id: 'r-boiler', owner_id: '6f1c2b3a-1111-4222-8333-944455556666', name: 'Котельная', sort: 1 },
+];
+let dashboard = [
+  { device_id: 'd1a2b3c4d5e6f7081', property: 'temperature' },
+  { device_id: 'd1a2b3c4d5e6f7081', property: 'heater' },
+  { device_id: 'd9f8e7d6c5b4a3920', property: 'water_temp' },
+  { device_id: 'dabcabcabcabcabc1', property: 'heating' },
+];
 const firmwares = new Map([
   ['f1', { id: 'f1', name: 'Теплица', version: '1.3.0', size: 912384, md5: 'a'.repeat(32), sha256: '3f9a1c0be41d7a55'.repeat(4), created_at: new Date(Date.now() - 86400e3).toISOString() }],
 ]);
@@ -185,6 +195,15 @@ async function api(req, res, url) {
   ] });
   if (p === '/api/sessions/revoke-others') return json(res, 200, { closed: 1 });
   if (p === '/api/devices' && req.method === 'GET') return json(res, 200, { devices: [...devices.values()].map((d) => ({ owner_id: USER.id, my_role: 'owner', ...d })) });
+  if (p === '/api/rooms' && req.method === 'GET') return json(res, 200, { rooms });
+  if (p === '/api/rooms' && req.method === 'POST') { const r = { id: crypto.randomUUID(), owner_id: USER.id, name: body.name, sort: rooms.length }; rooms.push(r); return json(res, 201, r); }
+  if ((x = m(/^\/api\/rooms\/([\w-]+)$/))) {
+    const r = rooms.find((y) => y.id === x[1]);
+    if (req.method === 'DELETE') { rooms.splice(rooms.indexOf(r), 1); for (const d of devices.values()) if (d.room_id === r.id) d.room_id = null; return json(res, 204); }
+    Object.assign(r, body); rooms.sort((a, b) => a.sort - b.sort); return json(res, 200, r);
+  }
+  if (p === '/api/dashboard' && req.method === 'GET') return json(res, 200, { items: dashboard });
+  if (p === '/api/dashboard' && req.method === 'PUT') { dashboard = body.items; return json(res, 200, { items: dashboard }); }
   if (p === '/api/homes') return json(res, 200, { homes: [{ owner_id: USER.id, owner_email: USER.email, role: 'owner' }, { owner_id: 'parent-home', owner_email: 'mama@example.com', role: 'control' }] });
   if (p === '/api/members' && req.method === 'GET') return json(res, 200, { members: [{ user_id: 'u-son', email: 'son@example.com', role: 'control', created_at: ago(86400 * 30) }, { user_id: 'u-wife', email: 'wife@example.com', role: 'admin', created_at: ago(86400 * 90) }], invites: [{ id: 'i1', role: 'view', created_at: ago(3600), expires_at: new Date(Date.now() + 6 * 86400e3).toISOString() }] });
   if ((x = m(/^\/api\/members\/([\w-]+)$/))) return json(res, req.method === 'DELETE' ? 204 : 200, { user_id: x[1], role: body?.role });
@@ -206,7 +225,7 @@ async function api(req, res, url) {
   if ((x = m(/^\/api\/devices\/(\w+)$/))) {
     const d = devices.get(x[1]);
     if (!d) return json(res, 404, { error: 'device_not_found' });
-    if (req.method === 'PUT') { d.name = body.name; return json(res, 200, d); }
+    if (req.method === 'PUT') { if (body.name !== undefined) d.name = body.name; if (body.room_id !== undefined) d.room_id = body.room_id; return json(res, 200, d); }
     if (req.method === 'DELETE') { devices.delete(d.id); return json(res, 204); }
     return json(res, 200, d);
   }

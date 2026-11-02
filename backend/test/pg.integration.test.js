@@ -11,6 +11,7 @@ import { Dispatcher } from '../src/notify/dispatcher.js';
 import { otaRoutes, handleOtaStatus } from '../src/routes/ota.js';
 import { accountRoutes } from '../src/routes/account.js';
 import { homeRoutes } from '../src/routes/homes.js';
+import { roomRoutes } from '../src/routes/rooms.js';
 import { createWebPush } from '../src/notify/webpush.js';
 import crypto from 'node:crypto';
 import { totpCode } from '../src/security.js';
@@ -67,7 +68,7 @@ before(async () => {
   await migrate(db, { log: {} }); // повторно — ничего не делает
   const mqtt = mqttFake;
   const webpush = await createWebPush({ db, subject: 'https://iot.test', log: {} });
-  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(homeRoutes({ db, config, emqx })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
+  api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(homeRoutes({ db, config, emqx })).use(roomRoutes({ db, config })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
     .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' }, webpush }))
     .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
@@ -563,4 +564,48 @@ test('shared homes: roles, invites, MQTT ACL, notifications on real SQL', { skip
   assert.equal(await acl(B), 'deny');
   assert.equal((await call(apiUrl, 'DELETE', `/api/members/${C.id}?owner=${A.id}`, null, C.auth)).status, 204);
   assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}`, null, C.auth)).status, 404);
+});
+
+test('rooms and dashboard on real SQL', { skip }, async () => {
+  const reg = async (email) => {
+    const r = await call(apiUrl, 'POST', '/api/auth/register', { email, password: 'password123' });
+    return { auth: `Bearer ${r.body.token}`, id: r.body.user.id };
+  };
+  const A = await reg('rooms-a@x.ru');
+  const B = await reg('rooms-b@x.ru');
+  const V = await reg('rooms-v@x.ru');
+  const inv = (await call(apiUrl, 'POST', '/api/invites', { role: 'view' }, A.auth)).body;
+  await call(apiUrl, 'POST', '/api/invites/accept', { code: inv.code }, V.auth);
+  const dev = (await call(apiUrl, 'POST', '/api/devices', { name: 'Лампа' }, A.auth)).body.device;
+  const bdev = (await call(apiUrl, 'POST', '/api/devices', { name: 'Чужая' }, B.auth)).body.device;
+
+  const kitchen = await call(apiUrl, 'POST', '/api/rooms', { name: 'Кухня' }, A.auth);
+  assert.equal(kitchen.status, 201);
+  assert.equal((await call(apiUrl, 'POST', '/api/rooms', { name: 'Кухня' }, A.auth)).status, 409);
+  const hall = (await call(apiUrl, 'POST', '/api/rooms', { name: 'Зал' }, A.auth)).body;
+  assert.equal(hall.sort, 1);
+  const bRoom = (await call(apiUrl, 'POST', '/api/rooms', { name: 'Б' }, B.auth)).body;
+  assert.equal((await call(apiUrl, 'POST', '/api/rooms', { name: 'X', home: A.id }, V.auth)).status, 403); // просмотр не создаёт
+
+  // устройство в комнату своего дома — да, в чужую — нет
+  assert.equal((await call(apiUrl, 'PUT', `/api/devices/${dev.id}`, { room_id: kitchen.body.id }, A.auth)).body.room_id, kitchen.body.id);
+  assert.equal((await call(apiUrl, 'PUT', `/api/devices/${dev.id}`, { room_id: bRoom.id }, A.auth)).status, 400);
+  assert.equal((await call(apiUrl, 'PUT', `/api/devices/${dev.id}`, { name: 'Лампа 2' }, A.auth)).body.room_id, kitchen.body.id); // имя без комнаты — комната не меняется
+  const roomsV = await call(apiUrl, 'GET', '/api/rooms', null, V.auth);
+  assert.deepEqual(roomsV.body.rooms.map((x) => x.name), ['Кухня', 'Зал']);
+  assert.equal((await call(apiUrl, 'PUT', `/api/rooms/${hall.id}`, { sort: 0 }, A.auth)).body.sort, 0);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/rooms/${kitchen.body.id}`, null, V.auth)).status, 403);
+  assert.equal((await call(apiUrl, 'DELETE', `/api/rooms/${kitchen.body.id}`, null, A.auth)).status, 204);
+  assert.equal((await call(apiUrl, 'GET', `/api/devices/${dev.id}`, null, A.auth)).body.room_id, null);
+
+  // главный экран: у каждого свой, только доступные устройства
+  assert.equal((await call(apiUrl, 'PUT', '/api/dashboard', { items: [{ device_id: bdev.id, property: 't' }] }, V.auth)).status, 400);
+  const items = [{ device_id: dev.id, property: 'relay' }, { device_id: dev.id, property: 'power' }];
+  assert.deepEqual((await call(apiUrl, 'PUT', '/api/dashboard', { items }, V.auth)).body.items, items);
+  assert.deepEqual((await call(apiUrl, 'GET', '/api/dashboard', null, V.auth)).body.items, items);
+  assert.deepEqual((await call(apiUrl, 'GET', '/api/dashboard', null, A.auth)).body.items, []);
+  assert.equal((await call(apiUrl, 'PUT', '/api/dashboard', { items: [items[0], items[0]] }, V.auth)).status, 400);
+  // убрали из дома — плитки пропадают
+  await call(apiUrl, 'DELETE', `/api/members/${V.id}`, null, A.auth);
+  assert.deepEqual((await call(apiUrl, 'GET', '/api/dashboard', null, V.auth)).body.items, []);
 });

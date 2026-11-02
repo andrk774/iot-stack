@@ -1,5 +1,5 @@
 // Состояние панели: устройства из REST + живые обновления по MQTT/WSS.
-import { get, getToken } from './api.js';
+import { get, put, getToken } from './api.js';
 import { MqttClient } from './mqtt-client.js';
 import { coerce } from './format.js';
 
@@ -7,6 +7,10 @@ class Store {
   constructor() {
     this.me = null;
     this.homes = [];
+    this.rooms = [];
+    this.dashboard = [];
+    this.rooms = [];
+    this.dashboard = [];
     this.devices = new Map();
     this.handlers = new Set();
     this.mqtt = null;
@@ -29,12 +33,44 @@ class Store {
   async init() {
     this.me = await get('/api/me');
     await this.loadHomes();
+    await Promise.all([this.loadRooms(), this.loadDashboard()]);
     await this.loadDevices();
     this.startLive();
   }
 
   async loadHomes() {
     try { this.homes = (await get('/api/homes')).homes; } catch { this.homes = []; }
+  }
+
+  async loadRooms() {
+    try { this.rooms = (await get('/api/rooms')).rooms; } catch { this.rooms = []; }
+    this.emit('rooms');
+  }
+
+  async loadDashboard() {
+    try { this.dashboard = (await get('/api/dashboard')).items; } catch { this.dashboard = []; }
+  }
+
+  onDashboard(deviceId, property) {
+    return this.dashboard.some((x) => x.device_id === deviceId && x.property === property);
+  }
+
+  /** Сохранить главный экран целиком */
+  async saveDashboard(items) {
+    const { items: saved } = await put('/api/dashboard', { items });
+    this.dashboard = saved;
+    this.emit('dashboard');
+  }
+
+  async toggleDashboard(deviceId, property) {
+    const items = this.onDashboard(deviceId, property)
+      ? this.dashboard.filter((x) => !(x.device_id === deviceId && x.property === property))
+      : [...this.dashboard, { device_id: deviceId, property }];
+    await this.saveDashboard(items);
+  }
+
+  roomName(id) {
+    return this.rooms.find((r) => r.id === id)?.name ?? null;
   }
 
   async loadDevices() {
@@ -78,6 +114,8 @@ class Store {
     this.handlers.clear();
     this.me = null;
     this.homes = [];
+    this.rooms = [];
+    this.dashboard = [];
   }
 
   onMessage(topic, payload) {
