@@ -320,3 +320,8 @@ progress { width: 160px; height: 8px; accent-color: var(--accent); }
 .tile-add { border: 0; background: var(--sunken); color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; place-content: center; }
 .room-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); align-items: center; }
 .room-row:first-child { border-top: 0; }
+.days { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.day { border: 1px solid var(--line); background: var(--surface); color: var(--muted); border-radius: var(--radius-s); padding: 5px 8px; font: inherit; font-size: 0.8125rem; cursor: pointer; }
+.day.is-on { background: var(--accent-soft); color: var(--ink); border-color: var(--accent); }
+.rule-head { gap: 10px; }
+.rule-head > select { margin-right: auto; }
