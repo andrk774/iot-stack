@@ -7,7 +7,9 @@ import { homeSelect, homeLabel, sharedMode } from '../access.js';
 
 const TYPES = {
   zigbee2mqtt: { label: 'Zigbee (zigbee2mqtt)', hint: 'Устройства и их свойства мост возьмёт из zigbee2mqtt сам.', profile: 'zigbee' },
-  esphome: { label: 'ESPHome и Tasmota (MQTT discovery)', hint: 'В конфигурации ESPHome должен быть компонент mqtt: с discovery.', profile: 'esphome' },
+  esphome: { label: 'ESPHome (MQTT discovery)', hint: 'В конфигурации ESPHome должен быть компонент mqtt: с discovery. Подходит и для других прошивок с discovery Home Assistant.', profile: 'esphome' },
+  tasmota: { label: 'Tasmota', hint: 'Устройства находятся сами (discovery Tasmota 9+). Старые прошивки — перечислите их Topic.', profile: 'tasmota' },
+  shelly: { label: 'Shelly (Gen1, Plus, Pro)', hint: 'В Shelly включите MQTT, для Plus/Pro — ещё «Generic status update over MQTT». Устройства находятся сами.', profile: 'shelly' },
   generic: { label: 'Любой MQTT по правилам', hint: 'Каждое правило связывает внешний топик со свойством устройства.', profile: 'generic' },
 };
 
@@ -24,6 +26,26 @@ function configFields(type, config = {}) {
   if (type === 'esphome') {
     const prefix = h('input', { value: config.discovery_prefix ?? 'homeassistant' });
     return { el: field('Префикс discovery', prefix, 'В ESPHome это mqtt → discovery_prefix, по умолчанию homeassistant.'), read: () => ({ discovery_prefix: prefix.value.trim() }) };
+  }
+  const list = (label, value, hint, key) => {
+    const input = h('input', { value: (value || []).join(', '), placeholder: 'через запятую, необязательно' });
+    return { el: field(label, input, hint), read: () => ({ [key]: input.value.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean) }) };
+  };
+  if (type === 'tasmota') {
+    const prefix = h('input', { value: config.discovery_prefix ?? 'tasmota/discovery' });
+    const topics = list('Топики устройств без discovery', config.topics, 'Значение Topic из настроек Tasmota, например kitchen_plug', 'topics');
+    return {
+      el: h('div', { class: 'stack' }, field('Префикс discovery', prefix), topics.el),
+      read: () => ({ discovery_prefix: prefix.value.trim(), ...topics.read() }),
+    };
+  }
+  if (type === 'shelly') {
+    const prefixes = list('Только эти устройства', config.prefixes, 'Пусто — все, чей топик начинается с shelly. Иначе — их MQTT-префиксы', 'prefixes');
+    const gen1 = h('input', { type: 'checkbox', checked: config.gen1 !== false });
+    return {
+      el: h('div', { class: 'stack' }, prefixes.el, h('label', { class: 'check' }, gen1, ' Старые Shelly Gen1 (топики shellies/…)')),
+      read: () => ({ ...prefixes.read(), gen1: gen1.checked }),
+    };
   }
   const area = h('textarea', { spellcheck: 'false', 'aria-label': 'Правила (JSON)' });
   area.value = config.mappings ? JSON.stringify(config.mappings, null, 2) : GENERIC_EXAMPLE;
@@ -97,6 +119,25 @@ function editDialog(bridge, onSaved) {
   });
 }
 
+/** Устройства моста, удалённые в панели: мост их больше не регистрирует. Здесь их можно вернуть. */
+async function ignoredDialog(bridge) {
+  const body = h('div', { class: 'stack' });
+  const load = async () => {
+    try {
+      const { ignored } = await get(`/api/bridges/${bridge.id}/ignored`);
+      mount(body, ignored.length ? h('div', { class: 'list' }, ...ignored.map((x) => h('div', { class: 'list-row' },
+        h('span'),
+        h('div', null, h('span', { class: 'title' }, x.name), h('div', { class: 'list-sub' }, h('code', null, x.key))),
+        actionButton('Вернуть', async () => {
+          try { await del(`/api/bridges/${bridge.id}/ignored/${encodeURIComponent(x.key)}`); toast('Устройство появится, когда мост получит от него данные'); await load(); } catch (e) { toast(errorMessage(e), 'error'); }
+        }, 'btn btn-small'))))
+        : h('p', { class: 'muted' }, 'Скрытых устройств нет. Устройство моста попадает сюда, когда его удаляют в панели, — чтобы мост не добавил его снова.'));
+    } catch (e) { mount(body, h('p', { class: 'form-error' }, errorMessage(e))); }
+  };
+  await load();
+  modal(`Скрытые устройства: ${bridge.name}`, body);
+}
+
 export function renderBridges(root) {
   const list = h('div', { class: 'list' });
   const host = h('div');
@@ -107,7 +148,7 @@ export function renderBridges(root) {
       if (bridges.length === 0) {
         mount(host, h('div', { class: 'empty' },
           h('h2', null, 'Мостов пока нет'),
-          h('p', null, 'Мост подключает к платформе устройства, которые не умеют работать с ней напрямую: Zigbee через zigbee2mqtt, прошивки ESPHome и Tasmota, любые MQTT-устройства по правилам.'),
+          h('p', null, 'Мост подключает к платформе устройства, которые не умеют работать с ней напрямую: Zigbee через zigbee2mqtt, прошивки ESPHome и Tasmota, реле Shelly, любые MQTT-устройства по правилам.'),
           h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editDialog(null, load) }, 'Добавить мост')));
         return;
       }
@@ -122,6 +163,7 @@ export function renderBridges(root) {
           h('div', { class: 'list-sub' }, h('code', null, b.id))),
         h('div', { class: 'row-actions', style: { marginTop: 0 } },
           h('button', { class: 'btn btn-small', type: 'button', onclick: () => editDialog(b, load) }, 'Настроить'),
+          h('button', { class: 'btn btn-small', type: 'button', onclick: () => ignoredDialog(b) }, 'Скрытые'),
           actionButton('Новый токен', async () => {
             if (!confirm('Старый токен перестанет работать. Мост нужно будет перезапустить с новым. Продолжить?')) return;
             try { const { token } = await post(`/api/bridges/${b.id}/token`); showToken(b, token); } catch (e) { toast(errorMessage(e), 'error'); }

@@ -130,6 +130,10 @@ const ERRORS = {
   invite_limit_reached: 'Слишком много неиспользованных приглашений',
   member_limit_reached: 'В доме уже максимум участников',
   member_not_found: 'Участник не найден',
+  device_ignored: 'Устройство скрыто: верните его в «Мосты → Скрытые»',
+  room_not_found: 'Комната не найдена',
+  room_exists: 'Комната с таким названием уже есть',
+  room_limit_reached: 'Слишком много комнат',
 };
 
 export function errorMessage(err) {

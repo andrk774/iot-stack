@@ -1,6 +1,7 @@
 // Ядро моста: регистрирует внешние устройства на платформе и гоняет значения/команды.
 import { toWire, parseCommand } from './props.js';
 
+const IGNORE_RETRY_MS = 10 * 60 * 1000;
 const DEVICE_TOPIC_RE = /^dev\/(d[0-9a-f]{16})\/([a-z][a-z0-9_-]{0,31})\/set$/;
 
 export class BridgeCore {
@@ -79,6 +80,8 @@ export class BridgeCore {
       dev.name = name ?? dev.name;
       dev.props = props;
     }
+    // устройство скрыто пользователем: не стучимся на сервер чаще раза в 10 минут
+    if (dev.ignoredUntil && Date.now() < dev.ignoredUntil) return;
     if (!dev.ready) dev.ready = this.register(dev);
     await dev.ready;
     if (dev.id) this.scheduleMeta(dev);
@@ -89,6 +92,7 @@ export class BridgeCore {
       try {
         const res = await this.d.api.registerDevice(dev.key, dev.name);
         dev.id = res.id;
+        dev.ignoredUntil = 0;
         this.byId.set(dev.id, dev);
         await this.d.subscribe(`dev/${dev.id}/+/set`);
         await this.publishMeta(dev);
@@ -98,6 +102,13 @@ export class BridgeCore {
         this.d.log.log?.(`device ${dev.key} -> ${dev.id} (${dev.name})`);
         return;
       } catch (e) {
+        if (e.code === 'device_ignored') {
+          if (!dev.ignoredUntil) this.d.log.log?.(`device ${dev.key} скрыто в панели — не регистрируется`);
+          dev.ignoredUntil = Date.now() + IGNORE_RETRY_MS;
+          dev.pending.clear();
+          dev.ready = null;
+          return;
+        }
         if (e.permanent || attempt >= 5) {
           this.d.log.error?.(`register ${dev.key} failed: ${e.message}`);
           dev.ready = null; // повторим при следующем событии устройства

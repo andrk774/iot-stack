@@ -3,7 +3,9 @@
 #
 #   cp .env.example .env    # вписать PUBLIC_HOST и выданные в панели BRIDGE_ID/BRIDGE_TOKEN
 #   docker compose --profile zigbee up -d          # Zigbee
-#   docker compose --profile esphome up -d         # ESPHome/Tasmota (их mqtt: указывает на этот mosquitto)
+#   docker compose --profile esphome up -d         # ESPHome (его mqtt: указывает на этот mosquitto)
+#   docker compose --profile tasmota up -d         # Tasmota
+#   docker compose --profile shelly up -d          # Shelly Gen1/Gen2/Gen3
 name: iot-home
 
 x-bridge: &bridge
@@ -63,6 +65,26 @@ services:
       MQTT_URL: mqtts://${PUBLIC_HOST}:8883
       BRIDGE_ID: ${ESPHOME_BRIDGE_ID:?выдаётся в панели}
       BRIDGE_TOKEN: ${ESPHOME_BRIDGE_TOKEN:?выдаётся в панели}
+      EXTERNAL_MQTT_URL: mqtt://mosquitto:1883
+
+  bridge-tasmota:
+    <<: *bridge
+    profiles: [tasmota]
+    environment:
+      API_URL: https://${PUBLIC_HOST:?set PUBLIC_HOST}
+      MQTT_URL: mqtts://${PUBLIC_HOST}:8883
+      BRIDGE_ID: ${TASMOTA_BRIDGE_ID:?выдаётся в панели}
+      BRIDGE_TOKEN: ${TASMOTA_BRIDGE_TOKEN:?выдаётся в панели}
+      EXTERNAL_MQTT_URL: mqtt://mosquitto:1883
+
+  bridge-shelly:
+    <<: *bridge
+    profiles: [shelly]
+    environment:
+      API_URL: https://${PUBLIC_HOST:?set PUBLIC_HOST}
+      MQTT_URL: mqtts://${PUBLIC_HOST}:8883
+      BRIDGE_ID: ${SHELLY_BRIDGE_ID:?выдаётся в панели}
+      BRIDGE_TOKEN: ${SHELLY_BRIDGE_TOKEN:?выдаётся в панели}
       EXTERNAL_MQTT_URL: mqtt://mosquitto:1883
 
 volumes:

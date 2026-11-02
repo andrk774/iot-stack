@@ -226,8 +226,12 @@ RFC 8291 (aes128gcm), подпись — VAPID (RFC 8292), без сторонн
 | Тип | Откуда устройства | Что поддерживается |
 |---|---|---|
 | `zigbee2mqtt` | `<base>/bridge/devices` | binary, numeric (с диапазоном), enum, text; свойства внутри light/switch/climate/cover/lock; доступность |
-| `esphome` | MQTT discovery (`homeassistant/…/config`) | sensor, binary_sensor, switch, number, select, light (вкл/выкл и яркость в JSON-схеме); доступность. Нужен компонент `mqtt:` в ESPHome, пример — `bridges/home/esphome-example.yaml`. Подходит и для Tasmota |
+| `esphome` | MQTT discovery (`homeassistant/…/config`) | sensor, binary_sensor, switch, number, select, light (вкл/выкл и яркость в JSON-схеме); доступность. Нужен компонент `mqtt:` в ESPHome, пример — `bridges/home/esphome-example.yaml` |
+| `tasmota` | discovery Tasmota 9+ (`tasmota/discovery/<MAC>/config`) или список Topic | реле `power`/`power1…N`, `dimmer`, все числовые датчики из `SENSOR` (энергия, климат, освещённость…) с единицами, RSSI, `LWT` |
+| `shelly` | Gen2/Gen3: `<id>/status/<компонент>`, `events/rpc`; Gen1: `shellies/<id>/…` | реле и свет (команды через RPC / `command`), мощность, напряжение, ток, энергия в кВт·ч, температура, шторы (позиция), входы, датчики H&T, батарея; `online` |
 | `generic` | правила в настройках моста | топик → свойство, ключ в JSON, `payload_on/off`, топик команды |
+
+Удалённое в панели устройство моста запоминается: мост больше не добавляет его снова. Вернуть — **Мосты → Скрытые**.
 
 Ограничения: ESPHome native API (порт 6053) не используется — только MQTT. В zigbee2mqtt не поддерживаются
 составные свойства (цвет XY, расписания термостатов).
@@ -307,7 +311,8 @@ curl -s "$H/api/notifications?unread=true" -H "$A"
 | GET, PUT, DELETE | `/api/bridges/:id` | удаление забирает устройства моста и их историю |
 | POST | `/api/bridges/:id/token` | новый токен |
 | GET | `/api/bridge/self`, `/api/bridge/devices` | для моста: `Authorization: Bridge <id>:<token>` |
-| POST | `/api/bridge/devices` | мост регистрирует устройство `{key, name}` |
+| POST | `/api/bridge/devices` | мост регистрирует устройство `{key, name}`; скрытое пользователем — `409 device_ignored` |
+| GET | `/api/bridges/:id/ignored` | скрытые устройства моста; `DELETE /api/bridges/:id/ignored/:key` — вернуть |
 | GET, POST | `/api/firmwares` | библиотека прошивок; POST — тело = файл `.bin`, `?name=&version=` |
 | DELETE | `/api/firmwares/:id` | |
 | GET, POST, DELETE | `/api/devices/:id/ota` | текущее задание; `{firmware_id}` — обновить; DELETE — отменить |
@@ -353,7 +358,6 @@ zigbee2mqtt и ESPHome, MQTT-кодек панели, Node- и Python-SDK с п�
 
 - Без ключа API EMQX (старый `.env` без `./setup.sh`) отзыв доступа не разрывает открытые сессии — бэкенд пишет об этом при старте.
 - ingest подтверждает сообщения до записи в БД: при падении в момент сброса можно потерять до секунды данных.
-- Устройство моста, удалённое в панели, появится снова после перезапуска моста, если оно всё ещё есть в zigbee2mqtt или ESPHome.
 - Нативного мобильного приложения нет — панель ставится на телефон как PWA.
 
 ## Лицензия

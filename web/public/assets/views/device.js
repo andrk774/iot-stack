@@ -268,7 +268,10 @@ export function renderDevice(root, { id }) {
   };
 
   const remove = async () => {
-    if (!confirm(`Удалить «${device.name}» вместе с историей?`)) return;
+    const text = device.bridge_id
+      ? `Удалить «${device.name}» вместе с историей? Мост больше не будет его добавлять; вернуть можно в «Мосты → Скрытые».`
+      : `Удалить «${device.name}» вместе с историей?`;
+    if (!confirm(text)) return;
     try {
       await del(`/api/devices/${device.id}`);
       store.remove(device.id);

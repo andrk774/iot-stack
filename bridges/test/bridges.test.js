@@ -174,3 +174,118 @@ test('core: registers devices, buffers values, routes commands', async () => {
   assert.equal(await core.onCommand('dev/d0000000000000001/temperature/set', B('5')), null); // не settable
   assert.equal(ext.length, 1);
 });
+
+// ---------- Tasmota ----------
+import { TasmotaAdapter } from '../src/adapters/tasmota.js';
+import { ShellyAdapter } from '../src/adapters/shelly.js';
+
+const devEv = (events) => events.filter((e) => e.kind === 'device').at(-1);
+const vals = (events) => events.filter((e) => e.kind === 'value').map((e) => [e.prop, e.value]);
+
+test('tasmota: discovery, sensors, power, dimmer, LWT, commands', () => {
+  const a = new TasmotaAdapter();
+  assert.deepEqual(a.subscriptions(), ['tasmota/discovery/+/config', 'tasmota/discovery/+/sensors']);
+  // реальный формат discovery Tasmota 13
+  const cfg = { ip: '192.168.1.50', dn: 'Розетка кухня', fn: ['Розетка', null], hn: 'kitchen-plug', mac: 'A4CF12AABBCC', md: 'Sonoff Pow R2', ty: 0, if: 0,
+    ofln: 'Offline', onln: 'Online', state: ['OFF', 'ON', 'TOGGLE', 'HOLD'], sw: '13.2.0', t: 'kitchen_plug', ft: '%prefix%/%topic%/',
+    tp: ['cmnd', 'stat', 'tele'], rl: [1, 0, 0, 0, 0, 0, 0, 0], swc: [-1], swn: [null], btn: [0], so: { 4: 0 }, lk: 0, lt_st: 0, sho: [], sht: [], ver: 1 };
+  let ev = a.handle('tasmota/discovery/A4CF12AABBCC/config', B(cfg));
+  assert.ok(ev.some((e) => e.kind === 'subscribe' && e.topic === 'tele/kitchen_plug/+'));
+  assert.ok(ev.some((e) => e.kind === 'subscribe' && e.topic === 'stat/kitchen_plug/+'));
+  assert.deepEqual(devEv(ev), { kind: 'device', key: 'a4cf12aabbcc', name: 'Розетка кухня', props: { power: { type: 'boolean', settable: true } } });
+
+  ev = a.handle('tasmota/discovery/A4CF12AABBCC/sensors', B({ sn: { Time: '2026-11-02T10:00:00', ENERGY: { TotalStartTime: 'x', Total: 12.5, Power: 120, Voltage: 229, Current: 0.52 }, TempUnit: 'C' } }));
+  const props = devEv(ev).props;
+  assert.deepEqual(props.energy_power, { type: 'float', unit: 'W' });
+  assert.deepEqual(props.energy_total, { type: 'float', unit: 'kWh' });
+  assert.ok(!('energy_totalstarttime' in props));
+  assert.deepEqual(vals(ev), [['energy_total', 12.5], ['energy_power', 120], ['energy_voltage', 229], ['energy_current', 0.52]]);
+
+  // повторные данные с тем же составом — без события устройства
+  ev = a.handle('tele/kitchen_plug/SENSOR', B({ Time: 'x', ENERGY: { Power: 80 } }));
+  assert.deepEqual(ev, [{ kind: 'value', key: 'a4cf12aabbcc', prop: 'energy_power', value: 80 }]);
+  assert.deepEqual(vals(a.handle('stat/kitchen_plug/POWER', B('ON'))), [['power', true]]);
+  assert.deepEqual(vals(a.handle('tele/kitchen_plug/STATE', B({ POWER: 'OFF', Wifi: { RSSI: 76 } }))), [['power', false], ['rssi', 76]]);
+  assert.deepEqual(a.handle('tele/kitchen_plug/LWT', B('Offline')), [{ kind: 'state', key: 'a4cf12aabbcc', state: 'lost' }]);
+  assert.deepEqual(a.command('a4cf12aabbcc', 'power', true), { topic: 'cmnd/kitchen_plug/POWER', payload: 'ON' });
+  assert.equal(a.command('a4cf12aabbcc', 'energy_power', 1), null);
+  assert.deepEqual(a.handle('tele/unknown/STATE', B({ POWER: 'ON' })), []);
+  assert.deepEqual(a.handle('tele/kitchen_plug/SENSOR', B('не json')), []);
+});
+
+test('tasmota: manual topics, multi-relay and dimmer learned from messages', () => {
+  const a = new TasmotaAdapter({ topics: ['hall'] });
+  const init = a.initialEvents();
+  assert.ok(init.some((e) => e.kind === 'device' && e.key === 'hall'));
+  let ev = a.handle('stat/hall/RESULT', B({ POWER1: 'ON', POWER2: 'OFF' }));
+  assert.deepEqual(Object.keys(devEv(ev).props).sort(), ['power1', 'power2']);
+  assert.deepEqual(vals(ev), [['power1', true], ['power2', false]]);
+  ev = a.handle('tele/hall/STATE', B({ POWER1: 'OFF', Dimmer: 40 }));
+  assert.deepEqual(devEv(ev).props.dimmer, { type: 'integer', min: 0, max: 100, settable: true });
+  assert.deepEqual(a.command('hall', 'power2', true), { topic: 'cmnd/hall/POWER2', payload: 'ON' });
+  assert.deepEqual(a.command('hall', 'dimmer', 55.4), { topic: 'cmnd/hall/Dimmer', payload: '55' });
+  ev = a.handle('tele/hall/SENSOR', B({ AM2301: { Temperature: 77.2, Humidity: 40.1, DewPoint: 50 }, TempUnit: 'F' }));
+  assert.equal(devEv(ev).props.am2301_temperature.unit, '°F');
+  assert.equal(devEv(ev).props.am2301_humidity.unit, '%');
+});
+
+// ---------- Shelly ----------
+test('shelly gen2: status topics, NotifyStatus, online, RPC commands', () => {
+  const a = new ShellyAdapter();
+  const id = 'shellyplus1pm-a8032ab12345';
+  let ev = a.handle(`${id}/online`, B('true'));
+  assert.deepEqual(ev.at(-1), { kind: 'state', key: id, state: 'ready' });
+  ev = a.handle(`${id}/status/switch:0`, B({ id: 0, source: 'init', output: false, apower: 0, voltage: 231.2, current: 0, aenergy: { total: 1520.4, by_minute: [0, 0, 0] }, temperature: { tC: 41.3, tF: 106.3 } }));
+  assert.deepEqual(devEv(ev).props, {
+    switch0: { type: 'boolean', settable: true }, switch0_power: { type: 'float', unit: 'W' }, switch0_voltage: { type: 'float', unit: 'V' },
+    switch0_current: { type: 'float', unit: 'A' }, switch0_energy: { type: 'float', unit: 'kWh' }, switch0_temp: { type: 'float', unit: '°C' },
+  });
+  assert.deepEqual(vals(ev).find(([p]) => p === 'switch0_energy'), ['switch0_energy', 1.5204]);
+  ev = a.handle(`${id}/events/rpc`, B({ src: id, dst: `${id}/events`, method: 'NotifyStatus', params: { ts: 1, 'switch:0': { id: 0, output: true, apower: 63.5 } } }));
+  assert.deepEqual(vals(ev), [['switch0', true], ['switch0_power', 63.5]]);
+  assert.equal(devEv(ev), undefined); // состав свойств не изменился
+  const cmd = a.command(id, 'switch0', false);
+  assert.equal(cmd.topic, `${id}/rpc`);
+  assert.deepEqual({ ...JSON.parse(cmd.payload), id: 0 }, { id: 0, src: `iot-bridge-${id}`, method: 'Switch.Set', params: { id: 0, on: false } });
+  assert.equal(a.command(id, 'switch0_power', 1), null);
+  // cover
+  ev = a.handle(`${id}/status/cover:0`, B({ id: 0, state: 'stopped', current_pos: 40, apower: 0 }));
+  assert.deepEqual(JSON.parse(a.command(id, 'cover0_pos', 75).payload).params, { id: 0, pos: 75 });
+  // чужие топики не трогаем
+  assert.deepEqual(a.handle('livingroom/status/switch:0', B({ output: true })), []);
+  assert.deepEqual(a.handle(`${id}/status/switch:0`, B('мусор')), []);
+});
+
+test('shelly gen1: relays, power, energy, roller, sensors, commands; prefixes filter', () => {
+  const a = new ShellyAdapter();
+  let ev = a.handle('shellies/shelly1pm-ABC123/relay/0', B('on'));
+  assert.deepEqual(devEv(ev).props, { relay0: { type: 'boolean', settable: true } });
+  assert.deepEqual(vals(ev), [['relay0', true]]);
+  assert.deepEqual(vals(a.handle('shellies/shelly1pm-ABC123/relay/0/power', B('42.5'))), [['relay0_power', 42.5]]);
+  assert.deepEqual(vals(a.handle('shellies/shelly1pm-ABC123/relay/0/energy', B('600000'))), [['relay0_energy', 10]]);
+  assert.deepEqual(a.handle('shellies/shelly1pm-ABC123/online', B('false')).at(-1), { kind: 'state', key: 'shelly1pm-ABC123', state: 'lost' });
+  assert.deepEqual(a.command('shelly1pm-ABC123', 'relay0', false), { topic: 'shellies/shelly1pm-ABC123/relay/0/command', payload: 'off' });
+  a.handle('shellies/shellyswitch25-1/roller/0/pos', B('30'));
+  assert.deepEqual(a.command('shellyswitch25-1', 'roller0_pos', 80), { topic: 'shellies/shellyswitch25-1/roller/0/command/pos', payload: '80' });
+  assert.deepEqual(vals(a.handle('shellies/shellyht-1/sensor/temperature', B('21.75'))), [['temperature', 21.75]]);
+  assert.deepEqual(a.handle('shellies/shellyht-1/sensor/temperature', B('nan')), []);
+
+  const only = new ShellyAdapter({ prefixes: ['kitchen-relay'], gen1: false });
+  assert.ok(!only.subscriptions().some((s) => s.startsWith('shellies/')));
+  assert.deepEqual(only.handle('shellyplus1-x/status/switch:0', B({ output: true })), []);
+  assert.equal(vals(only.handle('kitchen-relay/status/switch:0', B({ output: true })))[0][1], true);
+});
+
+test('core: device ignored by user is not re-registered for a while', async () => {
+  let calls = 0;
+  const core = new BridgeCore({
+    api: { registerDevice: async () => { calls++; throw Object.assign(new Error('409'), { permanent: true, code: 'device_ignored' }); } },
+    publish: async () => {}, subscribe: async () => {}, publishExternal: async () => {}, subscribeExternal: async () => {},
+    adapter: new TasmotaAdapter(), metaDebounceMs: 0, log: {},
+  });
+  await core.apply({ kind: 'device', key: 'k', name: 'n', props: {} });
+  await core.apply({ kind: 'device', key: 'k', name: 'n', props: {} });
+  await core.apply({ kind: 'value', key: 'k', prop: 'power', value: true });
+  assert.equal(calls, 1);
+  assert.equal(core.devices.get('k').id, null);
+});

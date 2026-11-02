@@ -7,6 +7,8 @@ import { BridgeCore } from './core.js';
 import { Zigbee2MqttAdapter } from './adapters/zigbee2mqtt.js';
 import { EsphomeAdapter } from './adapters/esphome.js';
 import { GenericAdapter } from './adapters/generic.js';
+import { TasmotaAdapter } from './adapters/tasmota.js';
+import { ShellyAdapter } from './adapters/shelly.js';
 
 const env = process.env;
 for (const k of ['BRIDGE_ID', 'BRIDGE_TOKEN', 'EXTERNAL_MQTT_URL']) {
@@ -19,7 +21,9 @@ const API_URL = env.API_URL || 'http://backend:8000';
 const MQTT_URL = env.MQTT_URL || 'mqtt://emqx:1883';
 const ca = env.PLATFORM_CA_FILE ? readFileSync(env.PLATFORM_CA_FILE) : undefined;
 
-const ADAPTERS = { zigbee2mqtt: Zigbee2MqttAdapter, esphome: EsphomeAdapter, generic: GenericAdapter };
+const ADAPTERS = {
+  zigbee2mqtt: Zigbee2MqttAdapter, esphome: EsphomeAdapter, generic: GenericAdapter, tasmota: TasmotaAdapter, shelly: ShellyAdapter,
+};
 
 const api = new BridgeApi({ url: API_URL, id: env.BRIDGE_ID, token: env.BRIDGE_TOKEN });
 const self = await api.self();
