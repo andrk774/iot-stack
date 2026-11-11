@@ -15,11 +15,12 @@ PASTE_CERTIFICATE_HERE
 IotDevice device("Кухня", "1.0.0");
 
 #if defined(ESP32)
-IotProperty& chipTemp = device.addFloat("chip_temp", "°C", 1);  // встроенный датчик есть только у ESP32
+// встроенный датчик есть только у ESP32; отправляем, только если изменилось на 0.5 °C и больше
+IotProperty& chipTemp = device.addFloat("chip_temp", "°C", 1).deadband(0.5);
 #endif
-IotProperty& uptime = device.addInt("uptime", "s");
-IotProperty& rssi = device.addInt("rssi", "dBm");
-IotProperty& relay = device.addBool("relay").onSet([](IotProperty&, const String& v) {
+// persist(): состояние реле переживёт пропадание питания — при старте SDK вызовет обработчик
+// с сохранённым значением, и реле вернётся в прежнее положение
+IotProperty& relay = device.addBool("relay").persist().onSet([](IotProperty&, const String& v) {
   digitalWrite(RELAY_PIN, v == "true" ? HIGH : LOW);
   return true;  // принять: SDK запомнит значение и отправит его серверу
 });
@@ -35,23 +36,22 @@ void setup() {
   device.setCaCert(CA_CERT);
   // портал откроется, если Wi-Fi не подключится за минуту; без пароля точка доступа открытая
   device.setPortal("change-me-1234");  // замените: от 8 символов, латиница и цифры
+  device.enableStats(60);              // rssi, uptime, free_heap, reset_reason, ip
   device.enableOta();                   // обновление прошивки из панели
   device.onOtaReboot([]() { digitalWrite(RELAY_PIN, LOW); });  // перед перезагрузкой выключить нагрузку
-  if (!device.begin()) Serial.println("Ошибки конфигурации — см. сообщения [iot] ОШИБКА выше");
 
-  relay.setBool(false);  // начальное состояние уйдёт на сервер при подключении
+  relay.setBool(false);  // по умолчанию — до begin(): после begin() затёрло бы восстановленное значение
+  if (!device.begin()) Serial.println("Ошибки конфигурации — см. сообщения [iot] ОШИБКА выше");
 }
 
 void loop() {
   device.loop();
 
+#if defined(ESP32)
   static uint32_t last = 0;
   if (millis() - last >= 10000) {
     last = millis();
-#if defined(ESP32)
     chipTemp.setFloat(temperatureRead());
-#endif
-    rssi.setInt(WiFi.RSSI());
-    uptime.setInt(millis() / 1000);
   }
+#endif
 }

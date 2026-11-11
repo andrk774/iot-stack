@@ -1,6 +1,6 @@
 {
   "name": "IotDevice",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "SDK for connecting ESP32 to the self-hosted IoT Stack: provisioning, config portal, MQTT over TLS, typed properties",
   "keywords": "iot, mqtt, esp32, provisioning, homie",
   "frameworks": "arduino",

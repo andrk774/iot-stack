@@ -49,6 +49,16 @@ struct Sim {
   std::vector<std::string> events;  // порядок: "pub:<topic>", "disconnect"
   std::string rx;                   // байты к устройству
   bool restarted = false;
+  uint32_t freeHeap = 150000;
+  int nvsWrites = 0;  // put* — чтобы проверить, что флеш не перезаписывается без нужды
+  // Wi-Fi: если reachableSsid задан, подключение есть только к этой сети
+  std::string wifiSsid, reachableSsid;
+  std::vector<std::pair<std::string, int>> scanResults;
+  bool scanDone = true;
+  int scanStarts = 0;
+  // глубокий сон
+  bool slept = false;
+  uint64_t sleepUs = 0;
 
   void reset() { *this = Sim(); }
   void sendToDevice(const std::string& topic, const std::string& payload);

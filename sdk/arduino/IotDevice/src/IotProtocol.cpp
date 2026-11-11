@@ -1,5 +1,6 @@
 #include "IotProtocol.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -159,6 +160,13 @@ bool normalizeValue(const PropSpec& spec, const std::string& raw, std::string& o
       return !out.empty();
     }
     default: {
+      if (!spec.enumValues.empty()) {
+        const std::string v = trim(raw);
+        for (const auto& e : spec.enumValues) {
+          if (v == e) { out = v; return true; }
+        }
+        return false;
+      }
       if (raw.size() > kMaxValueLen) return false;
       out = raw;
       return true;
@@ -226,6 +234,14 @@ std::string buildMeta(const std::string& name, const std::string& fw, const std:
     if (!p.unit.empty()) j += ",\"unit\":\"" + jsonEscape(p.unit) + "\"";
     if (p.settable) j += ",\"settable\":true";
     if (p.hasRange) j += ",\"min\":" + jsonNumber(p.min) + ",\"max\":" + jsonNumber(p.max);
+    if (!p.enumValues.empty()) {
+      j += ",\"enum\":[";
+      for (size_t i = 0; i < p.enumValues.size(); i++) {
+        if (i) j += ',';
+        j += "\"" + jsonEscape(p.enumValues[i]) + "\"";
+      }
+      j += ']';
+    }
     j += '}';
   }
   j += "}}";

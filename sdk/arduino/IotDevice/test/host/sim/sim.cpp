@@ -21,6 +21,7 @@ long random(long a, long) { return a; }
 float temperatureRead() { return 40.0f; }
 void configTime(long, int, const char*, const char*, const char*) {}
 void EspClass::restart() { sim.restarted = true; }
+uint32_t EspClass::getFreeHeap() { return sim.freeHeap; }
 
 static std::string u16str(const std::string& b, size_t& i) {
   size_t n = ((uint8_t)b[i] << 8) | (uint8_t)b[i + 1];

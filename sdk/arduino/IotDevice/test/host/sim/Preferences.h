@@ -6,11 +6,11 @@ class Preferences {
   bool begin(const char* name, bool readOnly = false, const char* partition_label = NULL) { (void)name; (void)readOnly; (void)partition_label; return true; }
   void end() {}
   bool clear() { sim.nvs.clear(); return true; }
-  bool remove(const char* key) { sim.nvs.erase(key); return true; }
+  bool remove(const char* key) { sim.nvsWrites++; return sim.nvs.erase(key) > 0; }
   bool isKey(const char* key) { return sim.nvs.count(key) > 0; }
-  size_t putString(const char* key, const char* value) { sim.nvs[key] = value; return strlen(value); }
-  size_t putString(const char* key, String value) { sim.nvs[key] = value.c_str(); return value.length(); }
-  size_t putUShort(const char* key, uint16_t value) { sim.nvs[key] = std::to_string(value); return 2; }
+  size_t putString(const char* key, const char* value) { sim.nvsWrites++; sim.nvs[key] = value; return strlen(value); }
+  size_t putString(const char* key, String value) { sim.nvsWrites++; sim.nvs[key] = value.c_str(); return value.length(); }
+  size_t putUShort(const char* key, uint16_t value) { sim.nvsWrites++; sim.nvs[key] = std::to_string(value); return 2; }
   uint16_t getUShort(const char* key, uint16_t defaultValue = 0) {
     auto it = sim.nvs.find(key);
     if (it == sim.nvs.end()) { sim.nvsMissingReads++; return defaultValue; }

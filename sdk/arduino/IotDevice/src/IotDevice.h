@@ -14,13 +14,14 @@
 #include <PubSubClient.h>
 
 #include <functional>
+#include <map>
 #include <vector>
 
 #include "IotPortal.h"
 #include "IotProtocol.h"
 #include "IotStorage.h"
 
-#define IOT_DEVICE_SDK_VERSION "0.3.0"
+#define IOT_DEVICE_SDK_VERSION "0.4.0"
 
 class IotDevice;
 
@@ -34,6 +35,16 @@ class IotProperty {
   IotProperty& onSet(SetHandler handler);           // делает свойство settable
   IotProperty& range(double min, double max);       // для Integer/Float, проверяется и сервером через $meta
   IotProperty& unit(const char* unit);
+  // Отправлять не чаще раза в ms. Промежуточные значения не теряются: последнее уйдёт,
+  // как только интервал истечёт.
+  IotProperty& minInterval(uint32_t ms);
+  // Отправлять, только если значение отличается от последнего отправленного на delta и больше
+  // (для bool/string и delta = 0 — при любом изменении). value() при этом всегда текущее.
+  IotProperty& deadband(double delta);
+  // Хранить значение во флеше: при старте begin() восстановит его и вызовет onSet,
+  // чтобы «железо» (реле, ШИМ) вернулось в прежнее состояние. Начальное значение
+  // по умолчанию задавайте до begin() — вызов set*() после begin() перезапишет восстановленное.
+  IotProperty& persist();
 
   void setBool(bool v);
   void setInt(long long v);
@@ -53,7 +64,10 @@ class IotProperty {
  private:
   friend class IotDevice;
   IotProperty(IotDevice* dev, const char* name, iot::PropType type);
-  void store(const std::string& canonical);
+  // fromServer — подтверждение команды: уходит сразу, без deadband и minInterval
+  void store(const std::string& canonical, bool fromServer = false);
+  bool worthSending() const;
+  void markSent();
 
   IotDevice* _dev;
   iot::PropSpec _spec;
@@ -62,6 +76,12 @@ class IotProperty {
   bool _hasValue = false;
   bool _dirty = false;
   bool _valid = true;
+  bool _persist = false;
+  uint32_t _minIntervalMs = 0;
+  double _deadband = -1;  // < 0 — выключено
+  String _sent;           // последнее отправленное серверу
+  bool _hasSent = false;
+  uint32_t _sentAt = 0;
 };
 
 class IotDevice {
@@ -75,10 +95,15 @@ class IotDevice {
   IotProperty& addInt(const char* name, const char* unit = nullptr);
   IotProperty& addFloat(const char* name, const char* unit = nullptr, int decimals = 2);
   IotProperty& addString(const char* name);
+  // Строка из фиксированного набора: команды с другими значениями SDK отклонит сам.
+  // В $meta — "type":"string" и "enum":[...]
+  IotProperty& addEnum(const char* name, std::initializer_list<const char*> values);
 
   // ---- настройки (вызывать до begin) ----
   // Значения по умолчанию; то, что сохранено через портал, имеет приоритет.
   void setWiFi(const char* ssid, const char* password);
+  // Запасная сеть: если текущая недоступна 20 с, устройство пробует другую
+  void setWiFiFallback(const char* ssid, const char* password);
   void setServer(const char* host, uint16_t mqttPort = 8883);
   void setClaimToken(const char* token);
   void setCaCert(const char* pem);          // корневой сертификат сервера (обязателен, если не setInsecure)
@@ -86,12 +111,23 @@ class IotDevice {
   void setConfigButton(int pin, bool activeLow = true);  // удержание 3 с при старте = сброс настроек
   void setPortal(const char* apPassword = nullptr, uint32_t timeoutSec = 300);
   void setDebug(Stream* out);               // например &Serial
+  // Служебные свойства rssi (dBm), uptime (s), free_heap (B), reset_reason, ip.
+  // rssi/uptime/free_heap отправляются раз в intervalSec, reset_reason и ip — при подключении и изменении.
+  void enableStats(uint32_t intervalSec = 60);
+  // Служебные команды через settable-свойство cmd: reboot, portal, reset, identify.
+  // Отправляются обычной командой: POST /api/devices/<id>/commands {"property":"cmd","value":"reboot"}
+  void enableCommands();
   // Обновление прошивки из панели (OTA). Выключено, пока не включите явно.
+  // Команда приходит в dev/<id>/$ota/set, ход и итог устройство сообщает в dev/<id>/$ota.
   // Перед перезагрузкой в новую прошивку вызывается onOtaReboot (выключить нагрузку, сохранить состояние).
   void enableOta(bool on = true) { _otaEnabled = on; }
   void onOtaReboot(std::function<void()> cb) { _onOtaReboot = cb; }
 
   void onStateChange(std::function<void(State)> cb) { _onState = cb; }
+  // Команда identify: помигать светодиодом, пискнуть — чтобы найти устройство физически
+  void onIdentify(std::function<void()> cb) { _onIdentify = cb; }
+  // Перед OTA: вернуть false, чтобы отказаться (например, идёт нагрев). Без обработчика — разрешено.
+  void onOtaStart(std::function<bool()> cb) { _onOtaStart = cb; }
 
   // false — в конфигурации есть ошибки (недопустимые имена свойств, слишком большой $meta).
   // Сами ошибки выводятся через setDebug и доступны в configErrors().
@@ -103,6 +139,12 @@ class IotDevice {
   bool publishState(const char* state);
   void resetConfig();                       // стереть всё из NVS и перезагрузиться
   void startPortal();                       // открыть портал настройки вручную
+  // Глубокий сон для батарейных устройств: отправить накопленные значения, $state = sleeping,
+  // штатно отключиться и уснуть. 0 — до внешнего пробуждения. На ESP8266 для пробуждения
+  // по таймеру GPIO16 соединяют с RST. После пробуждения устройство стартует заново (setup()).
+  void deepSleep(uint32_t seconds);
+  // Есть значения, которые ещё не ушли на сервер (офлайн, minInterval)
+  bool pending() const;
 
   bool online() const { return _state == State::Online; }
   State state() const { return _state; }
@@ -118,29 +160,62 @@ class IotDevice {
   void setState(State s);
   void loadConfig();
   bool needsPortal() const;
-  void enterPortal();
+  const char* missingConfig() const;
+  void enterPortal(const String& reason);
   void connectWiFi();
-  void syncTime();
+  void beginWiFi();
+  bool timeReady(uint32_t now);
+  void saveConfig(const IotConfig& c);
+  bool onCommand(const String& cmd);
+  void runCommand();
+  void handleOtaCommand(const std::string& json);
+  void runOta();
+  void reportOta(const std::string& job, const char* status, int progress = -1, const String& error = String());
+  void reportOtaAfterReboot();
+  void goOffline();
+  bool afterBegin(const char* what);
   ProvisionResult provision();
   bool connectMqtt();
   void onMqttMessage(char* topic, uint8_t* payload, unsigned int len);
-  void publishProperty(IotProperty& p);
+  void publishProperty(IotProperty& p, bool force = false);
+  void persistValue(IotProperty& p);
+  void restoreValues();
+  void updateStats();
   bool publish(const std::string& topic, const String& payload, bool retained);
   void scheduleRetry(uint32_t& backoffMs, uint32_t maxMs);
   void applyTls(WiFiClientSecure& client);
   void saveCredentials();
   std::vector<iot::PropSpec> metaSpecs() const;
   void configError(const char* fmt, ...);
-  void handleOtaCommand(const std::string& json);
-  void runOta();
-  void reportOta(const std::string& job, const char* status, int progress = -1, const String& error = String());
-  void reportOtaAfterReboot();
   void log(const char* fmt, ...);
 
   String _name, _fw;
   std::vector<IotProperty*> _props;
   std::vector<String> _configErrors;  // копятся до begin(): setDebug обычно вызывают позже объявления свойств
   bool _metaOk = true;                // $meta помещается в лимиты сервера и буфер MQTT
+  bool _begun = false;
+  std::map<std::string, std::string> _persisted;  // то, что лежит во флеше под ключом "pv"
+
+  IotProperty* _statRssi = nullptr;
+  IotProperty* _statUptime = nullptr;
+  IotProperty* _statHeap = nullptr;
+  IotProperty* _statReset = nullptr;
+  IotProperty* _statIp = nullptr;
+  uint32_t _statsIntervalMs = 0;
+  uint32_t _statsAt = 0;
+  uint64_t _uptimeMs = 0;             // millis() переполняется через 49 дней, а этот счётчик — нет
+  uint32_t _lastTick = 0;
+
+  IotProperty* _cmd = nullptr;
+  String _pendingCmd;                 // выполняется в loop(), после того как подтверждение ушло серверу
+  std::function<void()> _onIdentify;
+
+  bool _otaEnabled = false;
+  bool _otaPending = false;
+  iot::OtaRequest _ota;
+  String _otaUnsent;                  // отчёт, который не удалось отправить (MQTT был закрыт)
+  std::function<bool()> _onOtaStart;
+  std::function<void()> _onOtaReboot;
 
   IotConfig _cfg;            // итоговая конфигурация (NVS поверх значений по умолчанию)
   IotConfig _defaults;
@@ -167,13 +242,12 @@ class IotDevice {
   uint32_t _provisionBackoff = 2000;
   uint32_t _mqttBackoff = 1000;
   uint8_t _provisionRejects = 0;
+  uint8_t _authRejects = 0;           // брокер подряд отверг учётку
   bool _everOnline = false;
   bool _timeSynced = false;
+  bool _timeRequested = false;
+  uint32_t _timeDeadline = 0;
+  uint8_t _wifiIdx = 0;               // 0 — основная сеть, 1 — запасная
+  uint32_t _wifiAttemptAt = 0;
   std::function<void(State)> _onState;
-
-  bool _otaEnabled = false;
-  bool _otaPending = false;
-  iot::OtaRequest _ota;
-  String _otaUnsent;                  // отчёт, который не удалось отправить (MQTT был закрыт)
-  std::function<void()> _onOtaReboot;
 };

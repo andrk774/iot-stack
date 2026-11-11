@@ -15,21 +15,23 @@ PASTE_CERTIFICATE_HERE
 
 IotDevice device("Термостат", "1.2.0");
 
-IotProperty& temperature = device.addFloat("temperature", "°C", 1);
+// Датчик читаем часто (регулятору нужна свежая температура), а на сервер отправляем
+// только изменения от 0.2 °C и не чаще раза в 10 секунд
+IotProperty& temperature = device.addFloat("temperature", "°C", 1).deadband(0.2).minInterval(10000);
 IotProperty& heating = device.addBool("heating");
 
-// Значения вне 5..30 SDK отклонит сам, ещё до вызова обработчика
-IotProperty& target = device.addFloat("target", "°C", 1).range(5, 30).onSet(
+// Значения вне 5..30 SDK отклонит сам, ещё до вызова обработчика.
+// persist(): уставка и режим переживут перезагрузку
+IotProperty& target = device.addFloat("target", "°C", 1).range(5, 30).persist().onSet(
     [](IotProperty&, const String& v) {
       Serial.printf("новая уставка: %s\n", v.c_str());
       return true;
     });
 
-// Строковое свойство: проверяем допустимые значения сами
-IotProperty& mode = device.addString("mode").onSet([](IotProperty&, const String& v) {
-  bool ok = v == "off" || v == "heat" || v == "eco";
-  if (!ok) Serial.printf("неизвестный режим: %s\n", v.c_str());
-  return ok;  // false -> серверу вернётся прежнее значение
+// Режим из фиксированного списка: другие значения SDK отклонит сам, ещё до обработчика
+IotProperty& mode = device.addEnum("mode", {"off", "heat", "eco"}).persist().onSet([](IotProperty&, const String& v) {
+  Serial.printf("режим: %s\n", v.c_str());
+  return true;
 });
 
 float readTemperature() {
@@ -48,18 +50,19 @@ void setup() {
   device.setCaCert(CA_CERT);
   // портал откроется, если Wi-Fi не подключится за минуту; без пароля точка доступа открытая
   device.setPortal("change-me-1234");  // замените: от 8 символов, латиница и цифры
-  if (!device.begin()) Serial.println("Ошибки конфигурации — см. сообщения [iot] ОШИБКА выше");
 
+  // значения по умолчанию — до begin(): begin() заменит их сохранёнными, если такие есть
   target.setFloat(21.0);
   mode.setString("heat");
   heating.setBool(false);
+  if (!device.begin()) Serial.println("Ошибки конфигурации — см. сообщения [iot] ОШИБКА выше");
 }
 
 void loop() {
   device.loop();
 
   static uint32_t last = 0;
-  if (millis() - last < 15000) return;
+  if (millis() - last < 2000) return;
   last = millis();
 
   float t = readTemperature();

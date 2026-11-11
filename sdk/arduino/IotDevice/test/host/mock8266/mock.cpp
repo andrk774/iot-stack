@@ -2,6 +2,7 @@
 #include "Arduino.h"
 #include "ESP8266WiFi.h"
 #include "LittleFS.h"
+#include "Updater.h"
 HardwareSerial Serial;
 WiFiClass WiFi;
 EspClass ESP;
@@ -17,3 +18,7 @@ long random(long a, long) { return a; }
 FS LittleFS;
 void configTime(long, int, const char*, const char*, const char*) {}
 void EspClass::restart() {}
+extern "C" {
+#include "user_interface.h"
+}
+rst_info* EspClass::getResetInfoPtr() { static rst_info r{REASON_DEFAULT_RST, 0, 0, 0, 0, 0, 0}; return &r; }

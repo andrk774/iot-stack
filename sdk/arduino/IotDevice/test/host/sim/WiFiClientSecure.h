@@ -8,7 +8,8 @@ class NetworkClient : public Client {
   int connect(const char*, uint16_t) override { return open(); }
   size_t write(uint8_t b) override { return write(&b, 1); }
   size_t write(const uint8_t* buf, size_t size) override;
-  int available() override { return _open ? (int)sim.rx.size() : 0; }
+  // как настоящий TCP: принятое до закрытия соединения ещё можно прочитать (CONNACK с отказом)
+  int available() override { return (int)sim.rx.size(); }
   int read() override {
     if (!available()) return -1;
     uint8_t c = (uint8_t)sim.rx[0]; sim.rx.erase(0, 1); return c;

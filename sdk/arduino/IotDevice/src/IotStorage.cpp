@@ -81,7 +81,7 @@ size_t IotStorage::putUShort(const char* key, uint16_t value) {
 }
 
 bool IotStorage::remove(const char* key) {
-  if (_kv.erase(key) == 0) return true;
+  if (_kv.erase(key) == 0) return false;
   return save();
 }
 

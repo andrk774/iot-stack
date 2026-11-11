@@ -35,6 +35,14 @@ int main() {
     assert(s.getString("mpass") == "p=ss\\word");
     assert(s.getString("nope", String("def")) == "def");
     assert(!s.isKey("#end"));
+    s.putString("ota", String("abc"));
+    assert(s.remove("ota") && !s.isKey("ota") && s.isKey("ssid"));
+    assert(!s.remove("ota"));
+  }
+  {
+    IotStorage s;  // remove сохранился во флеше
+    assert(s.begin("iotdev"));
+    assert(!s.isKey("ota") && s.isKey("mpass"));
   }
 
   // сбой питания в прошивке 0.1.x: основной файл удалён, целый .tmp остался — настройки спасаются
@@ -63,7 +71,7 @@ int main() {
     IotStorage s;
     assert(s.begin("iotdev"));
     assert(s.getString("mpass") == "p=ss\\word");
-    assert(s.remove("mpass") && s.remove("absent"));
+    assert(s.remove("mpass") && !s.remove("absent"));  // как Preferences.remove на ESP32: ключа нет — false
     IotStorage again;  // удаление записано на флеш
     assert(again.begin("iotdev") && !again.isKey("mpass") && again.isKey("ssid"));
     s.clear();

@@ -207,8 +207,24 @@ static void testOta() {
   CHECK(buildOtaStatus(job, "failed", -1, "MD5 \"x\"") == "{\"job\":\"" + job + "\",\"status\":\"failed\",\"error\":\"MD5 \\\"x\\\"\"}");
 }
 
+static void testEnum() {
+  PropSpec mode;
+  mode.name = "mode";
+  mode.settable = true;
+  mode.enumValues = {"off", "heat", "eco"};
+  std::string out;
+  CHECK(normalizeValue(mode, " heat ", out));
+  CHECK_EQ(out, "heat");
+  CHECK(!normalizeValue(mode, "Heat", out));
+  CHECK(!normalizeValue(mode, "boost", out));
+  CHECK_EQ(buildMeta("x", "1", {mode}),
+           "{\"name\":\"x\",\"fw\":\"1\",\"props\":{\"mode\":{\"type\":\"string\",\"settable\":true,"
+           "\"enum\":[\"off\",\"heat\",\"eco\"]}}}");
+}
+
 int main() {
   testOta();
+  testEnum();
   testKv();
   testNames();
   testTopics();
