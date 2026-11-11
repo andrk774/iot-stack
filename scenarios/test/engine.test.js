@@ -212,3 +212,66 @@ test('conditions: any/all, device state, time window across midnight', async () 
   assert.equal(engine.conditionsHold(s4), true);
   assert.equal(engine.conditionsHold({ ...base, conditions: [] }), true);
 });
+
+// ---------- журнал запусков ----------
+function setupWithLog(scenarios, opts) {
+  const s = setup(scenarios, opts);
+  const log = [];
+  s.engine.deps.recordRun = async (sc, run) => { log.push({ id: sc.id, ...run }); };
+  return { ...s, log };
+}
+
+test('журнал: причина, шаги, ошибка шага', async () => {
+  const { engine, log, calls } = setupWithLog([hot]);
+  engine.deps.publishSet = async () => { throw new Error('mqtt not connected'); };
+  await Promise.all(engine.onValue(T, 'temperature', '31.5'));
+  assert.equal(log.length, 1);
+  const [run] = log;
+  assert.equal(run.status, 'error');
+  assert.deepEqual(run.cause, { kind: 'property', device_id: T, device_name: 'Теплица', property: 'temperature', value: '31.5' });
+  assert.deepEqual(run.steps, [{ type: 'set', ok: false, info: 'Вентилятор · relay = true', error: 'mqtt not connected' }]);
+  assert.equal(run.error, 'set: mqtt not connected');
+  assert.deepEqual(calls.runs, [['s1', 'set: mqtt not connected']], 'last_error по-прежнему сохраняется');
+
+  log.length = 0;
+  engine.deps.publishSet = async () => {};
+  await Promise.all(engine.runManual('s1'));
+  assert.equal(log[0].status, 'ok');
+  assert.deepEqual(log[0].cause, { kind: 'manual' });
+  assert.deepEqual(log[0].steps.map((x) => [x.type, x.ok]), [['set', true], ['delay', true], ['notify', true]]);
+});
+
+test('журнал: пропуск по условиям — не чаще раза в минуту, с логикой «любое»', async () => {
+  const { engine, log, advance } = setupWithLog([hot]);
+  await Promise.all(engine.onValue(R, 'mode', 'manual'));   // условие mode = auto не выполнено
+  await Promise.all(engine.onValue(T, 'temperature', '31'));
+  await Promise.all(engine.onValue(T, 'temperature', '20'));
+  await Promise.all(engine.onValue(T, 'temperature', '31'));
+  assert.deepEqual(log.map((r) => [r.status, r.error]), [['skipped', 'условия не выполнены']]);
+  advance(61_000);
+  await Promise.all(engine.onValue(T, 'temperature', '20'));
+  await Promise.all(engine.onValue(T, 'temperature', '31'));
+  assert.equal(log.length, 2);
+
+  const any = setupWithLog([{ ...hot, id: 's2', condition_mode: 'any' }]);
+  await Promise.all(any.engine.onValue(R, 'mode', 'manual'));
+  await Promise.all(any.engine.onValue(T, 'temperature', '31'));
+  assert.equal(any.log[0].error, 'ни одно из условий не выполнено');
+});
+
+test('журнал: пауза между запусками и «нет данных»', async () => {
+  const { engine, log, advance } = setupWithLog([{ ...hot, conditions: [], cooldown_sec: 600 }]);
+  await Promise.all(engine.onValue(T, 'temperature', '31'));
+  await Promise.all(engine.onValue(T, 'temperature', '20'));
+  await Promise.all(engine.onValue(T, 'temperature', '31'));
+  assert.deepEqual(log.map((r) => r.status), ['ok', 'skipped']);
+  assert.equal(log[1].error, 'пауза между запусками: 600 с');
+
+  const stale = setupWithLog([{ id: 's3', name: 'Тишина', enabled: true, cooldown_sec: 0,
+    trigger: { type: 'stale', device_id: T, minutes: 10 }, conditions: [], actions: [{ type: 'notify', level: 'alert', message: 'нет данных' }] }]);
+  stale.engine.onValue(T, 'temperature', '25');
+  stale.advance(11 * 60_000);
+  await Promise.all(stale.engine.poll());
+  assert.deepEqual(stale.log[0].cause, { kind: 'stale', device_id: T, device_name: 'Теплица', property: null, value: '10' });
+  advance(0);
+});

@@ -97,6 +97,17 @@ export function scenarioRoutes({ db, config }) {
     return reply(202, { queued: true });
   });
 
+  // Журнал: запуски (ok/error) и пропуски (skipped — условия не выполнены, пауза, слишком часто)
+  r.get('/api/scenarios/:id/runs', async ({ req, params: p, query }) => {
+    const userId = await auth(req);
+    const s = await own(userId, p.id, 'view');
+    const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+    const { rows } = await db.query(
+      `SELECT id, started_at, finished_at, status, cause, steps, error FROM scenario_runs
+       WHERE scenario_id = $1 ORDER BY id DESC LIMIT $2`, [s.id, limit]);
+    return { runs: rows.map((x) => ({ ...x, id: Number(x.id) })) };
+  });
+
   // ---------- уведомления ----------
   r.get('/api/notifications', async ({ req, query }) => {
     const userId = await auth(req);

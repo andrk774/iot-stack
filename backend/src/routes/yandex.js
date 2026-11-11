@@ -35,7 +35,7 @@ export function yandexRoutes({ db, mqtt, config, log = console }) {
   const r = new Router();
   const y = config.yandex || {};
   if (!y.clientId || !y.clientSecret) return r; // интеграция выключена
-  const auth = makeAuth(config, db);
+  const auth = makeAuth(config, db, { session: true });
   const prefixes = y.redirectPrefixes?.length ? y.redirectPrefixes : ['https://social.yandex.net/'];
 
   const checkClient = (id, secret) => typeof id === 'string' && safeEqual(id, y.clientId) && (secret === undefined || safeEqual(String(secret), y.clientSecret));

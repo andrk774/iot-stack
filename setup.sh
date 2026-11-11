@@ -40,13 +40,14 @@ if [ ! -f .env ]; then
     -e "s|^EMQX_COOKIE=.*|EMQX_COOKIE=$(gen)|" \
     -e "s|^EMQX_DASHBOARD_PASSWORD=.*|EMQX_DASHBOARD_PASSWORD=$(gen)|" \
     -e "s|^EMQX_API_SECRET=.*|EMQX_API_SECRET=$(gen)|" \
+    -e "s|^METRICS_TOKEN=.*|METRICS_TOKEN=$(gen)|" \
     .env.example > .env
   chmod 600 .env
   echo "Создан .env (секреты сгенерированы)"
 fi
 
 # Обновление со старой версии: дописать в .env переменные, которых в нём ещё нет
-SECRETS=" POSTGRES_PASSWORD JWT_SECRET MQTT_BACKEND_PASSWORD MQTT_INGEST_PASSWORD MQTT_SCENARIOS_PASSWORD EMQX_COOKIE EMQX_DASHBOARD_PASSWORD EMQX_API_SECRET "
+SECRETS=" POSTGRES_PASSWORD JWT_SECRET MQTT_BACKEND_PASSWORD MQTT_INGEST_PASSWORD MQTT_SCENARIOS_PASSWORD EMQX_COOKIE EMQX_DASHBOARD_PASSWORD EMQX_API_SECRET METRICS_TOKEN "
 while IFS= read -r line; do
   [[ "$line" =~ ^([A-Z0-9_]+)= ]] || continue
   key="${BASH_REMATCH[1]}"

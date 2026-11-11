@@ -53,5 +53,32 @@ export function createEmqxAdmin({ url, key, secret, fetchImpl = globalThis.fetch
     }
   }
 
-  return { enabled, kick, kickUser };
+  /** GET к REST API: объект ответа или null (ошибка уже в логе) */
+  async function getJson(pathAndQuery) {
+    if (!enabled) return null;
+    try {
+      const res = await fetchImpl(`${url.replace(/\/$/, '')}${pathAndQuery}`, {
+        headers: { authorization: auth },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        log.error?.(`emqx ${pathAndQuery}: HTTP ${res.status}`);
+        return null;
+      }
+      return await res.json();
+    } catch (e) {
+      log.error?.(`emqx ${pathAndQuery}: ${e.message}`);
+      return null;
+    }
+  }
+
+  /** Сводка для /metrics: подключения, подписки, retained + счётчики сообщений */
+  async function stats() {
+    const [s, m] = await Promise.all([getJson('/api/v5/stats?aggregate=true'), getJson('/api/v5/metrics?aggregate=true')]);
+    if (!s && !m) return null;
+    const one = (x) => (Array.isArray(x) ? x[0] : x) ?? {};
+    return { ...one(m), ...one(s) };
+  }
+
+  return { enabled, kick, kickUser, stats };
 }

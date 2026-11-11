@@ -5,12 +5,17 @@ import { checkUrl, OutboundError } from '../notify/net.js';
 import { BOT_TOKEN_RE } from '../notify/telegram.js';
 import { LEVEL_RANK } from '../notify/dispatcher.js';
 import { randomToken, sha256 } from '../security.js';
+import crypto from 'node:crypto';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CHAT_ID_RE = /^(-?\d{1,20}|@[A-Za-z0-9_]{5,32})$/;
 const MAX_CHANNELS = 20;
 const LINK_TTL_MIN = 15;
 const COLUMNS = 'id, type, name, config, min_level, enabled, last_sent_at, last_error, created_at';
+const EMAIL_RE = /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/;
+const EMAIL_CODE_TTL_MIN = 15;
+const EMAIL_RESEND_SEC = 60;
+const EMAIL_ATTEMPTS = 5;
 
 /** Что видит панель: без токенов, секретов и ключей подписки */
 export function publicChannel(ch) {
@@ -18,6 +23,7 @@ export function publicChannel(ch) {
   let info;
   if (ch.type === 'telegram') info = { chat_id: c.chat_id, chat_title: c.chat_title || null, own_bot: c.bot !== 'platform' };
   else if (ch.type === 'webhook') info = { url: c.url };
+  else if (ch.type === 'email') info = { email: c.email };
   else info = { device: c.device || null, endpoint_host: (() => { try { return new URL(c.endpoint).host; } catch { return null; } })() };
   return { id: ch.id, type: ch.type, name: ch.name, min_level: ch.min_level, enabled: ch.enabled,
     last_sent_at: ch.last_sent_at, last_error: ch.last_error, created_at: ch.created_at, ...info };
@@ -32,9 +38,9 @@ const level = (v) => {
 /**
  * @param {{ db, config, senders, telegramBot?: {username: string|null}, webpush?: {publicKey: string, checkSubscription: Function} }} deps
  */
-export function channelRoutes({ db, config, senders, telegramBot = null, webpush = null }) {
+export function channelRoutes({ db, config, senders, telegramBot = null, webpush = null, mail = null, log = console }) {
   const r = new Router();
-  const auth = makeAuth(config, db);
+  const auth = makeAuth(config, db, { session: true });
   const allowPrivate = Boolean(config.webhookAllowPrivate);
 
   const own = async (userId, id) => {
@@ -72,11 +78,55 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
   r.get('/api/channels', async ({ req }) => {
     const userId = await auth(req);
     const { rows } = await db.query(`SELECT ${COLUMNS} FROM notification_channels WHERE owner_id = $1 ORDER BY created_at`, [userId]);
+    const { rows: pend } = await db.query(
+      `SELECT email FROM email_verifications WHERE owner_id = $1 AND sent_at > now() - make_interval(mins => $2)`,
+      [userId, EMAIL_CODE_TTL_MIN]);
     return {
       channels: rows.map(publicChannel),
       telegram_bot: config.telegramBotToken ? (telegramBot?.username || '') : null,
       webpush_public_key: webpush?.publicKey || null,
+      email_available: Boolean(mail),
+      email_pending: pend[0]?.email ?? null,
     };
+  });
+
+  // Email: сначала код на адрес, канал появляется после подтверждения (POST /api/channels/email-confirm)
+  const startEmail = async (userId, body, minLevel) => {
+    if (!mail) throw new HttpError(409, 'email_not_configured');
+    const email = str(body.email, 'email', { max: 254, re: EMAIL_RE }).toLowerCase();
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+    // не чаще раза в минуту: иначе через панель можно засыпать письмами чужой ящик
+    const { rowCount } = await db.query(
+      `INSERT INTO email_verifications (owner_id, email, min_level, code_hash, sent_at, attempts) VALUES ($1, $2, $3, $4, now(), 0)
+       ON CONFLICT (owner_id) DO UPDATE SET email = EXCLUDED.email, min_level = EXCLUDED.min_level, code_hash = EXCLUDED.code_hash,
+              sent_at = now(), attempts = 0
+       WHERE email_verifications.sent_at < now() - make_interval(secs => $5)`,
+      [userId, email, minLevel, sha256(`${userId}:${code}`), EMAIL_RESEND_SEC]);
+    if (!rowCount) throw new HttpError(429, 'email_code_too_soon');
+    try {
+      await mail.send(email, `[IoT] Код подтверждения: ${code}`,
+        `Код для подключения уведомлений: ${code}\n\nОн действует ${EMAIL_CODE_TTL_MIN} минут.\nЕсли вы не запрашивали код, просто удалите это письмо.`);
+    } catch (e) {
+      log.error?.(`email code to ${email}: ${e.message}`);
+      await db.query('DELETE FROM email_verifications WHERE owner_id = $1', [userId]);
+      throw new HttpError(502, 'channel_send_failed', { reason: String(e.message).slice(0, 200) });
+    }
+    return reply(202, { pending: email });
+  };
+
+  r.post('/api/channels/email-confirm', async ({ req, body }) => {
+    const userId = await auth(req);
+    const code = str(String(body.code ?? ''), 'code', { min: 6, max: 6, re: /^\d{6}$/ });
+    const { rows } = await db.query(
+      `UPDATE email_verifications SET attempts = attempts + 1
+       WHERE owner_id = $1 AND sent_at > now() - make_interval(mins => $2) AND attempts < $3
+       RETURNING email, min_level, code_hash`, [userId, EMAIL_CODE_TTL_MIN, EMAIL_ATTEMPTS]);
+    if (!rows[0]) throw new HttpError(410, 'email_code_expired');
+    const ok = crypto.timingSafeEqual(Buffer.from(rows[0].code_hash), Buffer.from(sha256(`${userId}:${code}`)));
+    if (!ok) throw new HttpError(400, 'email_code_invalid');
+    await db.query('DELETE FROM email_verifications WHERE owner_id = $1', [userId]);
+    const ch = await insert(userId, 'email', rows[0].email, { email: rows[0].email }, rows[0].min_level);
+    return reply(201, { channel: publicChannel(ch) });
   });
 
   r.post('/api/channels', async ({ req, body }) => {
@@ -102,6 +152,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
       const cfg = { bot: BOT_TOKEN_RE.exec(botToken)[1], bot_token: botToken, chat_id: chatId };
       return reply(201, { channel: publicChannel(await insert(userId, 'telegram', name, cfg, minLevel)) });
     }
+    if (body.type === 'email') return startEmail(userId, body, minLevel);
     if (body.type === 'webpush') {
       if (!webpush) throw new HttpError(409, 'webpush_not_configured');
       const sub = body.subscription;
@@ -115,7 +166,7 @@ export function channelRoutes({ db, config, senders, telegramBot = null, webpush
       const ch = await insert(userId, 'webpush', body.name ? str(body.name, 'name', { max: 64 }) : (device || 'Браузер'), cfg, minLevel);
       return reply(201, { channel: publicChannel(ch) });
     }
-    throw new HttpError(400, 'validation', { field: 'type', reason: 'webhook|telegram|webpush (платформенный Telegram — через /api/channels/telegram-link)' });
+    throw new HttpError(400, 'validation', { field: 'type', reason: 'webhook|telegram|webpush|email (платформенный Telegram — через /api/channels/telegram-link)' });
   });
 
   // Ссылка t.me/<бот>?start=<код>: пользователь жмёт Start, бот привязывает чат

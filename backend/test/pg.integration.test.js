@@ -23,6 +23,11 @@ import { bridgeRoutes } from '../src/routes/bridges.js';
 import { internalRoutes } from '../src/routes/internal.js';
 import { IngestBuffer, batchToQueries } from '../../ingest/src/buffer.js';
 import { parseMessage } from '../../ingest/src/parse.js';
+import { tokenRoutes } from '../src/routes/tokens.js';
+import { metricsRoutes } from '../src/routes/metrics.js';
+import { saveScenarioRun } from '../../scenarios/src/runs.js';
+import { makeSenders } from '../src/notify/dispatcher.js';
+import { Metrics } from '../../shared/metrics.js';
 
 const URL_ = process.env.PG_TEST_URL;
 const skip = !URL_ && 'PG_TEST_URL не задан';
@@ -34,9 +39,12 @@ const kicked = [];
 const emqx = { kick: async (id) => { kicked.push(id); return true; }, kickUser: async (u) => { kicked.push(u); return 1; } };
 const mqttFake = { connected: true, publish: async (t, v, o) => { published.push([t, v, o]); } };
 const testSent = [];
+const mails = [];
+const testMail = { send: async (to, subject, text) => { mails.push({ to, subject, text }); } };
 const testSenders = {
   webhook: async (ch, n) => { testSent.push([ch.id, n.message]); },
   telegram: async (ch, n) => { testSent.push([ch.id, n.message]); },
+  email: makeSenders({ mail: testMail, publicHost: 'iot.test' }).email,
 };
 const config = {
   yandex: { clientId: 'yandex-alice', clientSecret: 's'.repeat(40) },
@@ -44,6 +52,7 @@ const config = {
   telegramBotToken: '1:x', webhookAllowPrivate: false,
   jwtSecret: 'j'.repeat(40), jwtTtlSec: 3600, allowRegistration: true, maxDevicesPerUser: 5, maxBridgeDevices: 3,
   claimTtlMin: 30, publicHost: 'iot.test', mqttPublicPort: 8883, serviceUsers: { backend: 'b', ingest: 'i', scenarios: 's' },
+  metricsToken: 'metrics-token-1234567890', metricsSources: {},
 };
 
 async function schemaWithoutTimescale() {
@@ -72,8 +81,10 @@ before(async () => {
   const webpush = await createWebPush({ db, subject: 'https://iot.test', log: {} });
   api = createServer(new Router().use(accountRoutes({ db, config, emqx })).use(homeRoutes({ db, config, emqx })).use(roomRoutes({ db, config })).use(yandexRoutes({ db, mqtt: mqttFake, config, log: {} })).use(publicRoutes({ db, mqtt, config, emqx })).use(scenarioRoutes({ db, config }))
     .use(bridgeRoutes({ db, config, log: {}, emqx }))
-    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' }, webpush }))
-    .use(otaRoutes({ db, mqtt: mqttFake, config })), { log: { error: (...a) => console.error(...a) } });
+    .use(channelRoutes({ db, config, senders: testSenders, telegramBot: { username: 'iot_test_bot' }, webpush, mail: testMail, log: {} }))
+    .use(otaRoutes({ db, mqtt: mqttFake, config }))
+    .use(tokenRoutes({ db, config, emqx }))
+    .use(metricsRoutes({ db, config, emqx: { stats: async () => ({ 'connections.count': 7 }) }, httpMetrics: new Metrics(), log: {} })), { log: { error: (...a) => console.error(...a) } });
   hooks = createServer(internalRoutes({ db, config, log: {} }));
   await new Promise((r) => api.listen(0, r));
   await new Promise((r) => hooks.listen(0, r));
@@ -690,4 +701,89 @@ test('Alice: OAuth account linking and smart home API on real SQL', { skip }, as
   assert.equal((await call(apiUrl, 'GET', '/api/oauth/links', null, auth)).body.links.length, 1);
   assert.equal((await Y('POST', '/user/unlink', {})).status, 200);
   assert.equal((await Y('GET', '/user/devices')).status, 401);
+});
+
+test('API-токены, канал email, журнал сценариев, /metrics — на настоящем SQL', { skip }, async () => {
+  const reg = await call(apiUrl, 'POST', '/api/auth/register', { email: 'port@x.ru', password: 'password123' });
+  const J = `Bearer ${reg.body.token}`;
+  const uid = reg.body.user.id;
+
+  // ---------- API-токены ----------
+  const ro = await call(apiUrl, 'POST', '/api/tokens', { name: 'HA', scope: 'read' }, J);
+  assert.equal(ro.status, 201);
+  assert.match(ro.body.token, /^iot_[\w-]{40}$/);
+  const rw = await call(apiUrl, 'POST', '/api/tokens', { name: 'Node-RED', scope: 'write', expires_days: 30 }, J);
+  const RO = `Bearer ${ro.body.token}`;
+  const RW = `Bearer ${rw.body.token}`;
+  assert.equal((await call(apiUrl, 'GET', '/api/devices', null, RO)).status, 200);
+  const roPost = await call(apiUrl, 'POST', '/api/devices', { name: 'x' }, RO);
+  assert.deepEqual([roPost.status, roPost.body.error], [403, 'token_read_only']);
+  const dev = await call(apiUrl, 'POST', '/api/devices', { name: 'Термостат' }, RW);
+  assert.equal(dev.status, 201, 'токен на запись создаёт устройство');
+  for (const [m, p] of [['GET', '/api/tokens'], ['GET', '/api/channels'], ['GET', '/api/sessions'], ['GET', '/api/me']]) {
+    const r = await call(apiUrl, m, p, null, RW);
+    assert.deepEqual([r.status, r.body.error], [403, 'session_required'], `${m} ${p} — только из панели`);
+  }
+  const list = await call(apiUrl, 'GET', '/api/tokens', null, J);
+  assert.equal(list.body.tokens.length, 2);
+  assert.ok(!JSON.stringify(list.body).includes(ro.body.token), 'сам токен не отдаётся');
+  const mqttTok = (pw) => call(hooksUrl, 'POST', '/internal/mqtt/auth', { username: `u:${uid}`, password: pw, clientid: `web-${uid}-node1` });
+  assert.equal((await mqttTok(ro.body.token)).body.result, 'allow', 'токен годится для живых данных по MQTT');
+  await db.query("UPDATE api_tokens SET expires_at = now() - interval '1 second' WHERE id = $1", [rw.body.id]);
+  assert.equal((await call(apiUrl, 'GET', '/api/devices', null, RW)).status, 401, 'истёк');
+  assert.equal((await call(apiUrl, 'DELETE', `/api/tokens/${ro.body.id}`, null, J)).status, 204);
+  assert.equal((await call(apiUrl, 'GET', '/api/devices', null, RO)).status, 401, 'отозван');
+  assert.equal((await mqttTok(ro.body.token)).body.result, 'deny');
+  assert.ok(kicked.includes(`u:${uid}`));
+
+  // ---------- канал email ----------
+  const start = await call(apiUrl, 'POST', '/api/channels', { type: 'email', email: 'Me@Example.com', min_level: 'warning' }, J);
+  assert.equal(start.status, 202);
+  const code = /(\d{6})/.exec(mails.at(-1).subject)[1];
+  assert.equal(mails.at(-1).to, 'me@example.com');
+  assert.equal((await call(apiUrl, 'POST', '/api/channels', { type: 'email', email: 'me@example.com' }, J)).status, 429, 'не чаще раза в минуту');
+  assert.equal((await call(apiUrl, 'GET', '/api/channels', null, J)).body.email_pending, 'me@example.com');
+  const wrong = code === '000000' ? '111111' : '000000';
+  assert.equal((await call(apiUrl, 'POST', '/api/channels/email-confirm', { code: wrong }, J)).status, 400);
+  const ok = await call(apiUrl, 'POST', '/api/channels/email-confirm', { code }, J);
+  assert.equal(ok.status, 201);
+  assert.deepEqual([ok.body.channel.type, ok.body.channel.email, ok.body.channel.min_level], ['email', 'me@example.com', 'warning']);
+  assert.equal((await call(apiUrl, 'POST', '/api/channels/email-confirm', { code }, J)).status, 410, 'код одноразовый');
+  const chList = await call(apiUrl, 'GET', '/api/channels', null, J);
+  assert.equal(chList.body.email_available, true);
+  assert.equal(chList.body.email_pending, null);
+  // рассылка: диспетчер берёт канал email из БД
+  mails.length = 0;
+  await db.query("INSERT INTO notifications (owner_id, level, message) VALUES ($1, 'info', 'тихо'), ($1, 'alert', 'Протечка')", [uid]);
+  await new Dispatcher({ db, senders: testSenders, log: {} }).kick();
+  assert.deepEqual(mails.map((m) => [m.to, m.subject]), [['me@example.com', '[IoT] Тревога']], 'ниже min_level не отправляется');
+  assert.equal((await call(apiUrl, 'POST', `/api/channels/${ok.body.channel.id}/test`, {}, J)).status, 200);
+
+  // ---------- журнал сценария ----------
+  const sc = await call(apiUrl, 'POST', '/api/scenarios', {
+    name: 'Журнал', trigger: { type: 'manual' }, actions: [{ type: 'notify', message: 'x' }],
+  }, J);
+  assert.equal(sc.status, 201);
+  for (let i = 0; i < 205; i++) {
+    await saveScenarioRun(db, sc.body.id, {
+      status: i % 2 ? 'ok' : 'skipped', cause: { kind: 'manual', n: i }, steps: [{ type: 'notify', ok: true, info: `#${i}` }],
+      error: i % 2 ? null : 'условия не выполнены', started_at: new Date(), finished_at: new Date(),
+    });
+  }
+  const runs = await call(apiUrl, 'GET', `/api/scenarios/${sc.body.id}/runs?limit=3`, null, J);
+  assert.deepEqual(runs.body.runs.map((r) => r.cause.n), [204, 203, 202]);
+  const kept = await db.query('SELECT count(*)::int AS n FROM scenario_runs WHERE scenario_id = $1', [sc.body.id]);
+  assert.equal(kept.rows[0].n, 200, 'хранятся последние 200');
+  const stranger = await call(apiUrl, 'POST', '/api/auth/register', { email: 'stranger@x.ru', password: 'password123' });
+  assert.equal((await call(apiUrl, 'GET', `/api/scenarios/${sc.body.id}/runs`, null, `Bearer ${stranger.body.token}`)).status, 404);
+
+  // ---------- /metrics ----------
+  assert.equal((await fetch(`${apiUrl}/metrics`)).status, 401);
+  const met = await fetch(`${apiUrl}/metrics`, { headers: { authorization: `Bearer ${config.metricsToken}` } });
+  assert.equal(met.status, 200);
+  const text = await met.text();
+  assert.match(text, /^iot_up\{service="emqx"\} 1$/m);
+  assert.match(text, /^iot_emqx_connections 7$/m);
+  assert.match(text, /^iot_users \d+$/m);
+  assert.match(text, /^iot_notifications_queued \d+$/m);
 });
