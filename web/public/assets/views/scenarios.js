@@ -120,12 +120,55 @@ function propSelect(deviceId, value, onChange, onlySettable = false) {
   return sel;
 }
 
-function propType(deviceId, prop) {
-  const d = store.devices.get(deviceId);
-  return d ? deviceProps(d).find((p) => p.name === prop)?.type : null;
+// ---------- журнал запусков ----------
+const RUN_STATUS = { ok: ['выполнен', 'ok'], error: ['ошибка', 'bad'], skipped: ['пропущен', 'muted'] };
+const CAUSE_KIND = { property: 'значение', state: 'состояние', schedule: 'расписание', manual: 'вручную', stale: 'нет данных' };
+const STEP_LABELS = { set: 'установить', notify: 'уведомить', delay: 'пауза' };
+
+function runsPanel(id) {
+  const list = h('div', { class: 'runs' });
+  const load = async () => {
+    try {
+      const { runs } = await get(`/api/scenarios/${id}/runs?limit=50`);
+      if (runs.length === 0) { mount(list, h('p', { class: 'muted' }, 'Сценарий ещё не запускался.')); return; }
+      mount(list, ...runs.map((r) => {
+        const [label, tone] = RUN_STATUS[r.status] || [r.status, 'muted'];
+        const c = r.cause || {};
+        const cause = [CAUSE_KIND[c.kind] || c.kind,
+          c.device_name || c.device_id ? `${c.device_name || c.device_id}${c.property ? ` · ${c.property}` : ''}` : null,
+          c.value !== undefined && c.kind !== 'schedule' && c.kind !== 'stale' ? `= ${c.value}` : null,
+          c.kind === 'stale' ? `${c.value} мин` : null].filter(Boolean).join(' ');
+        return h('article', { class: 'run' },
+          h('div', { class: 'run-head' },
+            h('span', { class: `state state-${tone}` }, h('span', { class: 'state-dot', 'aria-hidden': 'true' }), label),
+            h('time', { datetime: r.started_at, title: new Date(r.started_at).toLocaleString('ru-RU') }, relativeTime(r.started_at)),
+            h('span', { class: 'muted' }, cause)),
+          r.status === 'skipped' ? h('p', { class: 'muted' }, r.error) : null,
+          r.steps?.length ? h('ol', { class: 'run-steps' }, ...r.steps.map((st) => h('li', { class: st.ok ? '' : 'is-failed' },
+            `${STEP_LABELS[st.type] || st.type}: ${st.info}`, st.ok ? null : h('span', { class: 'form-error' }, ` — ${st.error}`)))) : null);
+      }));
+    } catch (e) { mount(list, h('p', { class: 'form-error' }, errorMessage(e))); }
+  };
+  load();
+  return h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', null, 'Журнал запусков'), actionButton('Обновить', load, 'btn btn-small')),
+    h('p', { class: 'muted' }, 'Последние 200 событий. Пропуски (условия не выполнены, пауза) пишутся не чаще раза в минуту.'),
+    list);
 }
 
-function valueInput(type, value, onChange) {
+function propSpec(deviceId, prop) {
+  const d = store.devices.get(deviceId);
+  return (d ? deviceProps(d).find((p) => p.name === prop) : null) || { type: null, enum: null };
+}
+
+function valueInput({ type, enum: options }, value, onChange) {
+  if (options) {
+    const sel = h('select', { 'aria-label': 'Значение' }, ...options.map((v) => h('option', { value: v }, v)));
+    sel.value = options.includes(String(value)) ? String(value) : options[0];
+    onChange(sel.value);
+    sel.addEventListener('change', () => onChange(sel.value));
+    return sel;
+  }
   if (type === 'boolean') {
     const sel = h('select', { 'aria-label': 'Значение' },
       h('option', { value: 'true' }, 'вкл'), h('option', { value: 'false' }, 'выкл'));
@@ -157,7 +200,7 @@ function comparisonRow(c, rerender, { allowChanged }) {
     deviceSelect(c.device_id, (v) => { c.device_id = v; c.property = ''; rerender(); }),
     propSelect(c.device_id, c.property, (v) => { c.property = v; rerender(); }),
     opSel,
-    c.op === 'changed' ? null : valueInput(propType(c.device_id, c.property), c.value, (v) => { c.value = v; }));
+    c.op === 'changed' ? null : valueInput(propSpec(c.device_id, c.property), c.value, (v) => { c.value = v; }));
 }
 
 export function renderScenarioEditor(root, { id }) {
@@ -339,7 +382,7 @@ export function renderScenarioEditor(root, { id }) {
           fields = [
             deviceSelect(a.device_id, (v) => { a.device_id = v; a.property = ''; drawActions(); }),
             propSelect(a.device_id, a.property, (v) => { a.property = v; drawActions(); }, true),
-            valueInput(propType(a.device_id, a.property), a.value, (v) => { a.value = v; }),
+            valueInput(propSpec(a.device_id, a.property), a.value, (v) => { a.value = v; }),
           ];
         }
         if (a.type === 'notify') {
@@ -420,7 +463,8 @@ export function renderScenarioEditor(root, { id }) {
       field('Не запускать повторно, секунд', cooldown, '0 — без ограничения. Полезно для уведомлений, чтобы не получать их каждую минуту.'),
       error,
       readOnlyNote,
-      buttons)));
+      buttons),
+    isNew ? null : runsPanel(id)));
 
   if (isNew) drawAll();
   else {

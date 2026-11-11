@@ -21,6 +21,15 @@ async function sendCommand(device, property, value) {
 
 function control(device, p, current) {
   if (!p.settable || !can(device, 'control')) return null;
+  if (p.enum) {
+    const sel = h('select', { 'aria-label': `Новое значение ${p.name}` },
+      ...p.enum.map((v) => h('option', { value: v }, v)));
+    if (p.enum.includes(String(current))) sel.value = String(current);
+    const send = actionButton('Отправить', async () => {
+      if (await sendCommand(device, p.name, sel.value)) toast(`${p.name}: отправлено ${sel.value}`);
+    }, 'btn btn-small');
+    return h('div', { class: 'inline-form' }, sel, send);
+  }
   if (p.type === 'boolean') {
     const on = current === true;
     const btn = h('button', {
