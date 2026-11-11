@@ -24,7 +24,7 @@ const devices = new Map([
     meta: { name: 'Теплица', fw: '1.2.0', props: {
       temperature: { type: 'float', unit: '°C' }, humidity: { type: 'float', unit: '%' },
       target: { type: 'float', unit: '°C', settable: true, min: 5, max: 30 },
-      heater: { type: 'boolean', settable: true }, mode: { type: 'string', settable: true },
+      heater: { type: 'boolean', settable: true }, mode: { type: 'string', settable: true, enum: ['eco', 'heat', 'off'] },
     } },
     last_values: { temperature: 24.6, humidity: 61, target: 22, heater: 0, mode: 'heat' },
   }],
@@ -187,6 +187,9 @@ const channels = new Map([
   ['c-wh', { id: 'c-wh', type: 'webhook', name: 'hooks.example.com', url: 'https://hooks.example.com/iot', min_level: 'alert', enabled: true, last_sent_at: null, last_error: '2026-10-28T10:00:00Z: HTTP 502' }],
 ]);
 
+let tokens = [];
+let emailPending = null;
+
 async function api(req, res, url) {
   const p = url.pathname;
   const m = (re) => re.exec(p);
@@ -305,7 +308,29 @@ async function api(req, res, url) {
     }, 700);
     return json(res, 202, { job });
   }
-  if (p === '/api/channels' && req.method === 'GET') return json(res, 200, { channels: [...channels.values()], telegram_bot: 'iot_demo_bot', webpush_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' });
+  // ---- API-токены, журнал сценария, email ----
+  if (p === '/api/tokens' && req.method === 'POST') {
+    const t = { id: crypto.randomUUID(), name: body.name, scope: body.scope, hint: 'demo', created_at: now(), expires_at: null, last_used_at: null };
+    tokens.unshift(t);
+    return json(res, 201, { ...t, token: `iot_${crypto.randomBytes(30).toString('base64url')}` });
+  }
+  if (p === '/api/tokens') return json(res, 200, { tokens });
+  if ((x = m(/^\/api\/tokens\/([\w-]+)$/))) { tokens = tokens.filter((t) => t.id !== x[1]); return json(res, 204); }
+  if ((x = m(/^\/api\/scenarios\/([\w-]+)\/runs$/))) {
+    return json(res, 200, { runs: [
+      { id: 2, started_at: now(), status: 'ok', cause: { kind: 'property', device_name: 'Теплица', property: 'temperature', value: '31.2' }, steps: [{ type: 'set', ok: true, info: 'Теплица · heater = false' }], error: null },
+      { id: 1, started_at: ago(3600), status: 'skipped', cause: { kind: 'property', device_name: 'Теплица', property: 'temperature', value: '30.5' }, steps: [], error: 'условия не выполнены' },
+    ] });
+  }
+  if (p === '/api/channels' && req.method === 'POST' && body.type === 'email') { emailPending = body.email; return json(res, 202, { pending: body.email }); }
+  if (p === '/api/channels/email-confirm') {
+    if (body.code !== '123456') return json(res, 400, { error: 'email_code_invalid' });
+    const c = { id: crypto.randomUUID(), type: 'email', name: emailPending, email: emailPending, min_level: 'info', enabled: true, last_sent_at: null, last_error: null, created_at: now() };
+    channels.set(c.id, c);
+    emailPending = null;
+    return json(res, 201, { channel: c });
+  }
+  if (p === '/api/channels' && req.method === 'GET') return json(res, 200, { email_available: true, email_pending: emailPending, channels: [...channels.values()], telegram_bot: 'iot_demo_bot', webpush_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' });
   if (p === '/api/channels' && req.method === 'POST') {
     const c = { id: crypto.randomUUID(), type: body.type, name: body.name || (body.type === 'webhook' ? new URL(body.url).host : `Telegram ${body.chat_id}`),
       min_level: body.min_level || 'info', enabled: true, last_sent_at: null, last_error: null, created_at: now(),

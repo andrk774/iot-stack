@@ -2,7 +2,7 @@
 import { Router } from '../http.js';
 import { aclDecision, identify } from '../acl.js';
 import { safeEqual, verifySecret } from '../security.js';
-import { checkSessionToken, accessSql } from './common.js';
+import { checkSessionToken, accessSql, isApiToken, findApiToken } from './common.js';
 
 const ALLOW = { result: 'allow', is_superuser: false };
 const ALLOW_SUPER = { result: 'allow', is_superuser: true };
@@ -28,6 +28,8 @@ export function internalRoutes({ db, config, log = console }) {
       // ни устройство, ни сервис, ни сессию другого пользователя
       const prefix = `web-${who.id}-`;
       if (!clientid.startsWith(prefix) || !/^[0-9a-z]{4,16}$/.test(clientid.slice(prefix.length))) return DENY;
+      // персональный API-токен — живые данные для Home Assistant, Node-RED (подписка только на чтение)
+      if (isApiToken(password)) return (await findApiToken(db, password))?.owner_id === who.id ? ALLOW : DENY;
       // токен панели действует, пока жива его сессия (выход, смена пароля — и сюда больше не пустит)
       const s = await checkSessionToken(db, config, password);
       return s?.userId === who.id ? ALLOW : DENY;

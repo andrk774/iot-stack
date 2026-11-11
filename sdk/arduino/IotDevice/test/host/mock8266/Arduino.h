@@ -95,7 +95,8 @@ long random(long min, long max);
 
 void configTime(long gmtOffset_sec, int daylightOffset_sec, const char* server1, const char* server2 = nullptr, const char* server3 = nullptr);
 
-class EspClass { public: void restart(); };
+struct rst_info;
+class EspClass { public: void restart(); uint32_t getFreeHeap() { return 30000; } rst_info* getResetInfoPtr(); void deepSleep(uint64_t us) { (void)us; } };
 extern EspClass ESP;
 
 #include "IPAddress.h"

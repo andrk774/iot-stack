@@ -50,10 +50,12 @@ export function deviceProps(device) {
       settable: spec?.settable === true,
       min: typeof spec?.min === 'number' ? spec.min : null,
       max: typeof spec?.max === 'number' ? spec.max : null,
+      // варианты значения (поле enum в $meta) — выпадающий список вместо текстового поля
+      enum: Array.isArray(spec?.enum) && spec.enum.length && spec.enum.every((x) => typeof x === 'string') ? spec.enum : null,
     }));
   }
   return Object.keys(device?.last_values || {}).map((name) => ({
-    name, type: null, unit: '', settable: false, min: null, max: null,
+    name, type: null, unit: '', settable: false, min: null, max: null, enum: null,
   }));
 }
 
@@ -109,6 +111,14 @@ const ERRORS = {
   channel_exists: 'Такой канал уже подключён',
   channel_limit_reached: 'Достигнут лимит каналов (20)',
   channel_send_failed: 'Не удалось отправить',
+  email_not_configured: 'Отправка почты не настроена на сервере: SMTP_URL и SMTP_FROM в .env',
+  email_code_too_soon: 'Код уже отправлен, повторить можно через минуту',
+  email_code_invalid: 'Неверный код',
+  email_code_expired: 'Код устарел или попытки закончились — запросите новый',
+  session_required: 'Это действие доступно только из панели',
+  token_read_only: 'Токен только для чтения',
+  token_limit_reached: 'Достигнут лимит токенов (20)',
+  token_not_found: 'Токен не найден',
   telegram_not_configured: 'Платформенный бот не настроен: TELEGRAM_BOT_TOKEN в .env',
   telegram_unavailable: 'Бот Telegram ещё не запустился, попробуйте через минуту',
   webpush_not_configured: 'Push-уведомления не настроены на сервере',

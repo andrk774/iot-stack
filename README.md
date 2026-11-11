@@ -62,10 +62,10 @@ EMQX Dashboard открыт только на localhost сервера:
   «Настроить → Добавить плитку», порядок стрелками), сводка «в сети / без связи», кнопки ручных сценариев.
 - **Устройства** — по комнатам (кнопка «Комнаты»: добавить, переименовать, порядок), с текущими значениями;
   значения обновляются вживую по MQTT over WSS. Комната выбирается на странице устройства.
-- **Устройство** — плитки строятся из `$meta`: переключатели для `boolean`, поля ввода для чисел и строк
+- **Устройство** — плитки строятся из `$meta`: переключатели для `boolean`, выпадающий список для `enum`, поля ввода для чисел и строк
   с учётом `min`/`max`, график за час/сутки/неделю/месяц/3 месяца/год: до 4 линий (свойства этого устройства и,
   для сравнения, других), выгрузка в CSV для Excel; комната, перепривязка, удаление.
-- **Сценарии** — редактор правил, включение и выключение, ручной запуск, последняя ошибка.
+- **Сценарии** — редактор правил, включение и выключение, ручной запуск, журнал запусков.
 - **Мосты** — создание, токен и готовые строки для `.env`, смена токена.
 - **Уведомления** — то, что прислали сценарии.
 - **Настройки** — каналы уведомлений, общий доступ, безопасность, прошивки для OTA.
@@ -134,6 +134,10 @@ bridge/<bid>/$state   состояние моста (LWT); при потере �
 Защита от зацикливания: пока сценарий выполняется, повторно он не запускается; не больше 30 запусков в минуту;
 настраиваемый интервал «не запускать повторно».
 
+Журнал запусков на странице сценария: когда и чем запущен (значение, состояние, «нет данных», расписание, вручную),
+что сделал каждый шаг и чем закончился, а также пропуски — условия не выполнены, пауза между запусками, слишком
+часто. Пропуски пишутся не чаще раза в минуту на сценарий; хранятся последние 200 записей.
+
 ## Аккаунт и безопасность
 
 **Настройки → Безопасность:**
@@ -146,7 +150,16 @@ bridge/<bid>/$state   состояние моста (LWT); при потере �
 и для REST, и для живого MQTT-подключения панели (EMQX разрывает его, панель переподключится уже с действующим токеном).
 После обновления на эту версию всем нужно войти заново (старые токены были без сеанса).
 
-Забыли пароль (писем платформа не отправляет):
+### API-токены
+
+**Настройки → API-токены** — для скриптов, Home Assistant, Node-RED. Токен `iot_…` передаётся как
+`Authorization: Bearer iot_…` и действует от имени владельца (в том числе в домах, куда его пригласили).
+«Только чтение» пропускает лишь GET. Срок — бессрочно, 30, 90 дней или год; отзыв действует сразу.
+Менять пароль, сеансы, 2FA, токены, каналы уведомлений, участников дома и связку с Алисой токеном нельзя — только из панели.
+Тот же токен годится как MQTT-пароль для живых данных (`wss://<host>/mqtt`, логин `u:<id>`,
+client id `web-<id>-<4–16 строчных букв и цифр>`), подписка только на чтение.
+
+Забыли пароль (сброс по почте платформа не делает):
 ```bash
 docker compose exec backend node scripts/reset-password.js you@example.com           # новый временный пароль
 docker compose exec backend node scripts/reset-password.js you@example.com --no-2fa  # и выключить 2FA
@@ -182,6 +195,10 @@ docker compose exec backend node scripts/reset-password.js you@example.com --no-
   Подпись: `X-Iot-Signature: sha256=HMAC_SHA256(secret, "<X-Iot-Timestamp>.<тело>")`, секрет показывается один раз.
   Адреса внутренних сетей (10/8, 192.168/16, 127/8, docker-сеть и т. п.) запрещены — проверка идёт после DNS,
   редиректы не выполняются.
+- **Email:** нужен SMTP в `.env` — `SMTP_URL` (`smtps://user:pass@host:465` или `smtp://user:pass@host:587`
+  со STARTTLS; без TLS пароль не отправляется) и `SMTP_FROM`. Адрес подтверждается кодом из письма — иначе через
+  сценарии можно было бы слать письма на чужой ящик; повторный код — не чаще раза в минуту. Адрес, который сервер
+  почты отклонил (5xx), выключает канал.
 - **Push в браузер** — см. «Приложение на телефон (PWA)».
 
 ## Приложение на телефон (PWA)
@@ -289,7 +306,7 @@ docker compose start backend ingest scenarios
 
 | SDK | Где | Для чего |
 |---|---|---|
-| `sdk/arduino/IotDevice` | Arduino IDE / PlatformIO | ESP32 и ESP8266: привязка, портал настройки Wi-Fi и токена, MQTT over TLS, свойства. Для установки по ссылке — отдельный репозиторий [andrk774/IotDevice](https://github.com/andrk774/IotDevice) |
+| `sdk/arduino/IotDevice` | Arduino IDE / PlatformIO | ESP32 и ESP8266 (0.4.0): привязка, портал настройки Wi-Fi и токена, MQTT over TLS, свойства с deadband/minInterval и сохранением во флеше, служебные команды и телеметрия, глубокий сон, OTA из панели. Для установки по ссылке — отдельный репозиторий [andrk774/IotDevice](https://github.com/andrk774/IotDevice) |
 | `sdk/node` | Node.js 18+ | Raspberry Pi и любой Linux |
 | `sdk/python` | Python 3.9+, paho-mqtt 2 | Raspberry Pi и любой Linux |
 
@@ -355,6 +372,11 @@ curl -s "$H/api/notifications?unread=true" -H "$A"
 | POST | `/api/channels/telegram-link` | ссылка на платформенного бота `t.me/<бот>?start=<код>` |
 | PUT, DELETE | `/api/channels/:id` | `{name?, min_level?, enabled?}` |
 | POST | `/api/channels/:id/test` | отправить тестовое сообщение |
+| POST | `/api/channels` `{type: email, email}` | код подтверждения на адрес; `POST /api/channels/email-confirm {code}` — создать канал |
+| GET, POST | `/api/tokens` | API-токены; POST `{name, scope: read|write, expires_days?}` → `token` (один раз) |
+| DELETE | `/api/tokens/:id` | отозвать |
+| GET | `/api/scenarios/:id/runs` | журнал запусков, `limit` до 200 |
+| GET | `/metrics` | Prometheus, `Authorization: Bearer <METRICS_TOKEN>` |
 
 ## Эксплуатация
 
@@ -363,6 +385,31 @@ docker compose ps
 docker compose logs -f backend ingest scenarios emqx
 docker compose pull && docker compose build && docker compose up -d     # обновление
 ```
+
+### Мониторинг (Prometheus)
+
+`https://<host>/metrics` с заголовком `Authorization: Bearer <METRICS_TOKEN>` (токен генерирует `setup.sh`;
+пустой — эндпоинт выключен). Одна точка сбора на всю платформу: бэкенд добавляет к своим метрикам сводку из БД,
+статистику EMQX и метрики ingest и scenarios из внутренней сети (`:9100/metrics`, наружу не публикуется).
+
+```yaml
+scrape_configs:
+  - job_name: iot
+    scheme: https
+    authorization: { credentials: <METRICS_TOKEN> }
+    static_configs: [{ targets: ['<host>'] }]
+```
+
+| Метрика | Что показывает |
+|---|---|
+| `iot_up{service}` | доступность backend, emqx, ingest, scenarios |
+| `iot_emqx_connections`, `iot_emqx_messages_*_total`, `iot_emqx_auth_failures_total` | подключения и трафик брокера |
+| `iot_ingest_written_rows_total`, `…_dropped_rows_total`, `…_rejected_rows_total` | записано / выброшено при переполнении / отклонено БД |
+| `iot_ingest_buffered_rows`, `iot_ingest_journal_bytes` | ждут записи в БД; растут — база не принимает данные |
+| `iot_scenarios_runs_total{status}`, `iot_scenarios_action_errors_total{type}` | запуски и ошибки действий сценариев |
+| `iot_notify_deliveries_total{channel,result}`, `iot_notifications_queued`, `iot_channels_failing` | доставка уведомлений |
+| `iot_devices{state}`, `iot_users`, `iot_scenarios_failing` | сводка из БД |
+| `iot_backend_http_requests_total{code}` | ответы API по классу |
 
 ## Разработка и тесты
 

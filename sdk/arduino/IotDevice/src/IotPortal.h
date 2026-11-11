@@ -3,12 +3,24 @@
 
 #include "IotPlatform.h"
 
+#include <vector>
+
 struct IotConfig {
   String ssid;
   String wifiPass;
+  String ssid2;      // запасная сеть; пусто — нет
+  String wifiPass2;
   String host;
   uint16_t port = 8883;
   String claimToken;
+};
+
+// Что показать пользователю на странице портала
+struct IotPortalInfo {
+  String reason;    // почему открыт портал
+  String deviceId;  // пусто — ещё не привязано
+  String mac;
+  String firmware;
 };
 
 class IotPortal {
@@ -16,7 +28,8 @@ class IotPortal {
   IotPortal() : _server(80) {}
 
   // current — значения для подстановки в форму
-  void begin(const String& apName, const String& apPassword, const IotConfig& current, const String& deviceName);
+  void begin(const String& apName, const String& apPassword, const IotConfig& current, const String& deviceName,
+             const IotPortalInfo& info);
   // true, когда пользователь сохранил форму; результат — в saved()
   bool loop();
   void end();
@@ -27,12 +40,17 @@ class IotPortal {
   void handleRoot();
   void handleSave();
   void redirectToRoot();
+  void startScan();
+  void collectScan();
 
   IotWebServer _server;
   DNSServer _dns;
   IotConfig _current;
   IotConfig _saved;
   String _deviceName;
+  IotPortalInfo _info;
+  std::vector<String> _networks;  // найденные сети, сильные первыми
+  bool _scanning = false;
   bool _active = false;
   bool _done = false;
   bool _routes = false;

@@ -19,6 +19,10 @@ import { homeRoutes } from './routes/homes.js';
 import { roomRoutes } from './routes/rooms.js';
 import { yandexRoutes } from './routes/yandex.js';
 import { YandexNotifier } from './yandex/notify.js';
+import { sendMail } from './notify/smtp.js';
+import { tokenRoutes } from './routes/tokens.js';
+import { metricsRoutes } from './routes/metrics.js';
+import { Metrics } from '../../shared/metrics.js';
 
 const config = loadConfig();
 
@@ -92,10 +96,19 @@ try {
 } catch (e) {
   console.error(`web push disabled: ${e.message}`);
 }
+// почта: SMTP_URL + SMTP_FROM; без них канал email недоступен
+const mail = config.smtpUrl && config.smtpFrom
+  ? { send: (to, subject, text) => sendMail(config.smtpUrl, { from: config.smtpFrom, to, subject, text }, { name: config.publicHost }) }
+  : null;
 const senders = makeSenders({
-  telegram, platformBotToken: config.telegramBotToken, webpush, allowPrivate: config.webhookAllowPrivate,
+  telegram, platformBotToken: config.telegramBotToken, webpush, mail, publicHost: config.publicHost,
+  allowPrivate: config.webhookAllowPrivate,
 });
-const dispatcher = new Dispatcher({ db, senders });
+// ---------- метрики бэкенда (отдаются вместе с остальными по /metrics) ----------
+const httpMetrics = new Metrics();
+const mRequests = httpMetrics.counter('iot_backend_http_requests_total', 'Запросы к API по классу ответа (2xx, 4xx, 5xx)');
+const mNotify = httpMetrics.counter('iot_notify_deliveries_total', 'Доставка уведомлений по типу канала и результату');
+const dispatcher = new Dispatcher({ db, senders, onResult: (type, ok) => mNotify.inc({ channel: type, result: ok ? 'ok' : 'error' }) });
 
 // LISTEN на отдельном соединении; при обрыве — переподключение
 let listener = null;
@@ -124,10 +137,14 @@ const api = new Router()
   .use(publicRoutes({ db, mqtt, config, emqx }))
   .use(scenarioRoutes({ db, config }))
   .use(bridgeRoutes({ db, config, emqx }))
-  .use(channelRoutes({ db, config, senders, telegramBot, webpush }))
-  .use(otaRoutes({ db, mqtt, config }));
+  .use(channelRoutes({ db, config, senders, telegramBot, webpush, mail }))
+  .use(otaRoutes({ db, mqtt, config }))
+  .use(tokenRoutes({ db, config, emqx }))
+  .use(metricsRoutes({ db, config, emqx, httpMetrics }));
+if (!config.metricsToken) console.log('METRICS_TOKEN не задан: /metrics выключен');
+if (!mail) console.log('SMTP_URL/SMTP_FROM не заданы: канал email выключен');
 
-const publicServer = createServer(api);
+const publicServer = createServer(api, { onResponse: (status) => mRequests.inc({ code: `${String(status)[0]}xx` }) });
 const internalServer = createServer(internalRoutes({ db, config }), { bodyLimit: 8 * 1024 });
 
 publicServer.listen(config.publicPort, '0.0.0.0', () => console.log(`api on :${config.publicPort}`));

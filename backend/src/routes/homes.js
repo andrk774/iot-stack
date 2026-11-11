@@ -36,7 +36,7 @@ export async function acceptInvite(tx, userId, code) {
 /** @param {{ db, config, emqx?: {kickUser?: Function} }} deps */
 export function homeRoutes({ db, config, emqx = {} }) {
   const r = new Router();
-  const auth = makeAuth(config, db);
+  const auth = makeAuth(config, db, { session: true });
   // разрыв MQTT-сессий панели: EMQX кеширует решения ACL, после отзыва доступа кеш должен сброситься
   const kickWeb = (userId) => emqx.kickUser?.(`u:${userId}`).catch(() => 0);
 

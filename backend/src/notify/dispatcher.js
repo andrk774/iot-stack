@@ -24,8 +24,36 @@ export function signWebhook(secret, timestamp, body) {
   return 'sha256=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
 }
 
-export function makeSenders({ telegram, platformBotToken, webpush, allowPrivate = false, now = () => Date.now() }) {
+const LEVEL_LABELS = { info: 'Инфо', warning: 'Внимание', alert: 'Тревога' };
+
+/** Письмо-уведомление: тема и текст */
+export function emailContent(n, publicHost) {
+  const subject = `[IoT] ${LEVEL_LABELS[n.level] ?? n.level}${n.scenario_name ? `: ${n.scenario_name}` : ''}`;
+  const lines = [n.message, ''];
+  if (n.scenario_name) lines.push(`Сценарий: ${n.scenario_name}`);
+  lines.push(`Уровень: ${LEVEL_LABELS[n.level] ?? n.level}`, `Время: ${new Date(n.created_at).toISOString()}`);
+  if (publicHost) lines.push('', `https://${publicHost}/#/notifications`);
+  lines.push('', 'Отключить письма: «Настройки» → «Куда присылать уведомления» в панели.');
+  return { subject, text: lines.join('\n') };
+}
+
+/**
+ * @param {{ mail?: { send: (to, subject, text) => Promise<void> } | null, publicHost?: string }} deps
+ *   mail — отправка писем (SMTP_URL/SMTP_FROM); без неё канал email не работает
+ */
+export function makeSenders({ telegram, platformBotToken, webpush, mail = null, publicHost = '', allowPrivate = false, now = () => Date.now() }) {
   return {
+    async email(ch, n) {
+      if (!mail) throw new Error('отправка почты не настроена (SMTP_URL, SMTP_FROM)');
+      const { subject, text } = emailContent(n, publicHost);
+      try {
+        await mail.send(ch.config.email, subject, text);
+      } catch (e) {
+        // 5xx на RCPT — адрес не существует или отклонён: дальше слать бессмысленно
+        if (e.stage === 'RCPT' && e.code >= 500) throw new PermanentError(e.message);
+        throw e;
+      }
+    },
     async telegram(ch, n) {
       const token = ch.config.bot === 'platform' ? platformBotToken : ch.config.bot_token;
       if (!token) throw new Error('платформенный бот не настроен (TELEGRAM_BOT_TOKEN)');
@@ -58,8 +86,9 @@ export function makeSenders({ telegram, platformBotToken, webpush, allowPrivate 
 }
 
 export class Dispatcher {
-  constructor({ db, senders, log = console, now = () => Date.now(), retryDelayMs = 2000, sleep }) {
-    Object.assign(this, { db, senders, log, now, retryDelayMs });
+  /** onResult(type, ok) — для метрик доставки */
+  constructor({ db, senders, log = console, now = () => Date.now(), retryDelayMs = 2000, sleep, onResult }) {
+    Object.assign(this, { db, senders, log, now, retryDelayMs, onResult });
     this.sleep = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.busy = false;
     this.again = false;
@@ -132,6 +161,7 @@ export class Dispatcher {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await send(ch, n);
+        this.onResult?.(ch.type, true);
         await this.db.query('UPDATE notification_channels SET last_sent_at = now(), last_error = NULL WHERE id = $1', [ch.id]);
         return false;
       } catch (e) {
@@ -141,6 +171,7 @@ export class Dispatcher {
       }
     }
     const permanent = lastErr instanceof PermanentError;
+    this.onResult?.(ch.type, false);
     this.log.warn?.(`channel ${ch.id} (${ch.type}): ${lastErr.message}`);
     await this.db.query(
       `UPDATE notification_channels SET last_error = $2${permanent ? ', enabled = false' : ''} WHERE id = $1`,

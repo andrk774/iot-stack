@@ -27,6 +27,9 @@ struct PropSpec {
   double min = 0;
   double max = 0;
   int decimals = 2;  // для Float
+  // Для String: допустимые значения. В $meta тип остаётся "string" (так его понимают веб-панель
+  // и сценарии), а список уходит дополнительным полем "enum".
+  std::vector<std::string> enumValues;
 };
 
 constexpr size_t kMaxValueLen = 256;  // лимит ingest

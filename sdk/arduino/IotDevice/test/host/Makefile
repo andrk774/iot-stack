@@ -21,7 +21,7 @@ $(BUILD)/protocol_test: protocol_test.cpp $(SRC)/IotProtocol.cpp $(SRC)/IotProto
 $(PUBSUB)/src/PubSubClient.cpp:
 	git clone --depth 1 https://github.com/knolleary/pubsubclient.git $(PUBSUB)
 
-EXAMPLES := Basic Portal Thermostat
+EXAMPLES := Basic Portal Thermostat DeepSleep
 
 # ---------- поведение: SDK + настоящий PubSubClient против симулятора (sim/) ----------
 $(BUILD)/pubsub-sim.o: $(PUBSUB)/src/PubSubClient.cpp

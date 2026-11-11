@@ -25,7 +25,7 @@ const clientInfo = (req) => ({
  */
 export function accountRoutes({ db, config, emqx = {} }) {
   const r = new Router();
-  const auth = makeAuth(config, db);
+  const auth = makeAuth(config, db, { session: true });
   const kickWeb = (userId) => emqx.kickUser?.(`u:${userId}`).catch(() => 0);
 
   async function newSession(user, req) {

@@ -141,8 +141,10 @@ function send(res, status, body) {
   res.end(data);
 }
 
-export function createServer(router, { bodyLimit = 16 * 1024, log = console } = {}) {
+/** onResponse(status) — для счётчиков запросов */
+export function createServer(router, { bodyLimit = 16 * 1024, log = console, onResponse } = {}) {
   return http.createServer(async (req, res) => {
+    if (onResponse) res.on('finish', () => onResponse(res.statusCode));
     try {
       const url = new URL(req.url, 'http://localhost');
       const m = router.match(req.method, url.pathname);

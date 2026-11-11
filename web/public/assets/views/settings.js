@@ -6,9 +6,10 @@ import { firmwaresSection } from './ota.js';
 import { securitySection, describeAgent } from './security.js';
 import { membersSection } from './members.js';
 import { aliceSection } from './alice.js';
+import { tokensSection } from './tokens.js';
 
 export const LEVEL_OPTIONS = { info: 'Все уведомления', warning: 'Внимание и тревога', alert: 'Только тревога' };
-const TYPE_LABELS = { telegram: 'Telegram', webhook: 'Вебхук', webpush: 'Браузер' };
+const TYPE_LABELS = { telegram: 'Telegram', webhook: 'Вебхук', webpush: 'Браузер', email: 'Email' };
 
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const isIos = () => /iPhone|iPad/.test(navigator.userAgent);
@@ -42,7 +43,42 @@ const levelSelect = (value) => {
 function channelSub(c) {
   if (c.type === 'telegram') return c.own_bot ? `свой бот, чат ${c.chat_id}` : `чат ${c.chat_title || c.chat_id}`;
   if (c.type === 'webhook') return c.url;
+  if (c.type === 'email') return c.email;
   return c.device || c.endpoint_host || '';
+}
+
+// Email: адрес подтверждается кодом из письма, канал появляется после подтверждения
+function emailDialog(onSaved, pending = null) {
+  const addr = h('input', { type: 'email', placeholder: 'you@example.com', value: pending || '', autocomplete: 'email' });
+  const lvl = levelSelect('info');
+  const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 6, placeholder: '123456' });
+  const codeField = field('Код из письма', code, 'Действует 15 минут. Не пришло — проверьте «Спам» или отправьте ещё раз через минуту.');
+  codeField.hidden = !pending;
+  const error = h('p', { class: 'form-error', role: 'alert' });
+  const sendBtn = h('button', { class: 'btn', type: 'button' }, pending ? 'Отправить код ещё раз' : 'Отправить код');
+  const okBtn = h('button', { class: 'btn btn-primary', type: 'button', hidden: !pending }, 'Подтвердить');
+  const dlg = modal('Email', h('div', { class: 'stack' },
+    h('p', { class: 'muted' }, 'На адрес придёт код подтверждения. После подтверждения уведомления будут приходить письмами.'),
+    field('Адрес', addr), field('Что отправлять', lvl), codeField, error), [sendBtn, okBtn]);
+  sendBtn.addEventListener('click', async () => {
+    error.textContent = '';
+    try {
+      await post('/api/channels', { type: 'email', email: addr.value.trim(), min_level: lvl.value });
+      codeField.hidden = false;
+      okBtn.hidden = false;
+      sendBtn.textContent = 'Отправить код ещё раз';
+      code.focus();
+    } catch (e) { error.textContent = e.details?.reason ? `${errorMessage(e)}: ${e.details.reason}` : errorMessage(e); }
+  });
+  okBtn.addEventListener('click', async () => {
+    error.textContent = '';
+    try {
+      await post('/api/channels/email-confirm', { code: code.value.trim() });
+      dlg.close();
+      onSaved();
+      toast('Email подключён');
+    } catch (e) { error.textContent = errorMessage(e); }
+  });
 }
 
 function webhookDialog(onSaved) {
@@ -126,6 +162,9 @@ function notificationsSection() {
     }
     buttons.push(h('button', { class: 'btn', type: 'button', onclick: () => ownBotDialog(load) }, data.telegram_bot !== null ? 'Свой бот' : 'Telegram (свой бот)'));
     buttons.push(h('button', { class: 'btn', type: 'button', onclick: () => webhookDialog(load) }, 'Вебхук'));
+    if (data.email_available) {
+      buttons.push(h('button', { class: 'btn', type: 'button', onclick: () => emailDialog(load, data.email_pending) }, 'Email'));
+    }
     if (data.webpush_public_key && pushSupported()) {
       buttons.push(actionButton('Push в этот браузер', async () => {
         try {
@@ -177,7 +216,7 @@ function notificationsSection() {
   return section;
 }
 
-export const settingsSections = [notificationsSection, membersSection, aliceSection, securitySection, firmwaresSection];
+export const settingsSections = [notificationsSection, membersSection, aliceSection, securitySection, tokensSection, firmwaresSection];
 
 export function renderSettings(root) {
   mount(root, h('header', { class: 'page-head' }, h('h1', null, 'Настройки')), ...settingsSections.map((s) => s()));

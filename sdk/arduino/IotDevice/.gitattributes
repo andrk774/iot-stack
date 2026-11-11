@@ -1,0 +1,2 @@
+# LF везде: Makefile и тесты запускаются в WSL/Linux, с CRLF make ломается
+* text=auto eol=lf

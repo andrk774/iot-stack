@@ -1,0 +1,2 @@
+# сборка тестов на ПК (make -C test/host), включая скачанный PubSubClient
+test/host/build/

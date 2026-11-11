@@ -3,6 +3,8 @@ import pg from 'pg';
 import mqtt from 'mqtt';
 import crypto from 'node:crypto';
 import { Engine } from './engine.js';
+import { saveScenarioRun } from './runs.js';
+import { Metrics, serveMetrics } from '../../shared/metrics.js';
 
 const env = process.env;
 for (const k of ['DATABASE_URL', 'MQTT_PASSWORD']) {
@@ -20,6 +22,14 @@ const client = mqtt.connect(env.MQTT_URL || 'mqtt://emqx:1883', {
   reconnectPeriod: 3000,
 });
 
+// ---------- метрики (http://scenarios:9100/metrics внутри docker-сети; снаружи — через /metrics бэкенда) ----------
+const metrics = new Metrics();
+const mRuns = metrics.counter('iot_scenarios_runs_total', 'Запуски сценариев по результату (ok, error, skipped)');
+const mActionErrors = metrics.counter('iot_scenarios_action_errors_total', 'Ошибки действий сценариев по типу действия');
+metrics.gaugeFn('iot_scenarios_loaded', 'Включённых сценариев загружено', () => engine.scenarios.size);
+metrics.gaugeFn('iot_scenarios_mqtt_connected', 'Подключение scenario-runner к брокеру (1/0)', () => (client.connected ? 1 : 0));
+serveMetrics(metrics, Number(env.METRICS_PORT || 9100));
+
 const engine = new Engine({
   defaultTz: env.TZ || 'UTC',
   log: console,
@@ -33,6 +43,12 @@ const engine = new Engine({
   },
   saveRun: async (s, error) => {
     await db.query('UPDATE scenarios SET last_run_at = now(), last_error = $2 WHERE id = $1', [s.id, error]);
+  },
+  // журнал запусков (последние 200 на сценарий) + метрики
+  recordRun: async (s, run) => {
+    mRuns.inc({ status: run.status });
+    for (const st of run.steps) if (!st.ok) mActionErrors.inc({ type: st.type });
+    await saveScenarioRun(db, s.id, run);
   },
 });
 

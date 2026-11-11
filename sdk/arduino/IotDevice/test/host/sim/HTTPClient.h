@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include "WiFiClientSecure.h"
 // тело ответа GET читается как поток
 class SimBodyStream : public NetworkClient {

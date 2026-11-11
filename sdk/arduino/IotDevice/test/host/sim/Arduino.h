@@ -95,7 +95,7 @@ long random(long min, long max);
 float temperatureRead();
 void configTime(long gmtOffset_sec, int daylightOffset_sec, const char* server1, const char* server2 = nullptr, const char* server3 = nullptr);
 
-class EspClass { public: void restart(); };
+class EspClass { public: void restart(); uint32_t getFreeHeap(); };
 extern EspClass ESP;
 
 #include "IPAddress.h"

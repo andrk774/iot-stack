@@ -35,6 +35,15 @@ export function loadConfig(env = process.env) {
     webhookAllowPrivate: env.WEBHOOK_ALLOW_PRIVATE === 'true',
     // контакт для push-сервисов браузеров (VAPID): https://<домен> или mailto:адрес
     webpushSubject: env.WEBPUSH_SUBJECT || `https://${required('PUBLIC_HOST')}`,
+    // Email: smtps://user:pass@host:465 или smtp://user:pass@host:587 (STARTTLS); без них канал email выключен
+    smtpUrl: env.SMTP_URL || '',
+    smtpFrom: env.SMTP_FROM || '',
+    // /metrics для Prometheus: без токена выключен. Источники — /metrics сервисов внутри docker-сети
+    metricsToken: env.METRICS_TOKEN || '',
+    metricsSources: {
+      ingest: env.INGEST_METRICS_URL || 'http://ingest:9100/metrics',
+      scenarios: env.SCENARIOS_METRICS_URL || 'http://scenarios:9100/metrics',
+    },
     // максимальный размер файла прошивки для OTA
     firmwareMaxBytes: Math.round(Number(env.FIRMWARE_MAX_MB || 4) * 1024 * 1024),
     // Алиса (умный дом Яндекса): данные для связки аккаунтов и, по желанию, уведомлений о состоянии

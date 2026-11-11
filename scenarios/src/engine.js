@@ -3,6 +3,7 @@ import { compare, comparable, isSettable, inTimeWindow } from '../../shared/scen
 import { parseCron, cronMatches, localParts } from '../../shared/cron.js';
 
 const MAX_RUNS_PER_MIN = 30;
+const SKIP_LOG_INTERVAL_MS = 60_000;
 
 export class Engine {
   /**
@@ -10,6 +11,7 @@ export class Engine {
    *   publishSet: (deviceId, property, value) => Promise<void>,
    *   notify: (scenario, level, message) => Promise<void>,
    *   saveRun: (scenario, error|null) => Promise<void>,
+   *   recordRun?: (scenario, { status, cause, steps, error, started_at, finished_at }) => Promise<void>,
    *   sleep?: (ms) => Promise<void>, now?: () => number, log?: object, defaultTz?: string }} deps
    */
   constructor(deps) {
@@ -24,6 +26,7 @@ export class Engine {
     this.running = new Set();
     this.runLog = new Map(); // scenario id -> [timestamps]
     this.lastRunAt = new Map();
+    this.lastSkipLog = new Map(); // scenario id -> время последней записи о пропуске
   }
 
   /** Полная перезагрузка из БД. Значения устройств и края условий сохраняются. */
@@ -204,20 +207,49 @@ export class Engine {
     return s.condition_mode === 'any' ? list.some((c) => this.conditionHolds(c)) : list.every((c) => this.conditionHolds(c));
   }
 
+  /** Что запустило сценарий — для журнала */
+  cause(s, ctx) {
+    const dev = ctx.deviceId ? this.devices.get(ctx.deviceId) : null;
+    return {
+      kind: ctx.manual ? 'manual' : s.trigger.type,
+      ...(ctx.deviceId ? { device_id: ctx.deviceId, device_name: dev?.name ?? null, property: ctx.property || null } : {}),
+      ...(ctx.value !== undefined ? { value: String(ctx.value).slice(0, 256) } : {}),
+    };
+  }
+
+  /** Пропуск в журнал: не чаще раза в минуту на сценарий — «изменилось» может срабатывать каждую секунду */
+  recordSkip(s, ctx, reason, now) {
+    if (!this.deps.recordRun) return;
+    const last = this.lastSkipLog.get(s.id) ?? -Infinity;
+    if (now - last < SKIP_LOG_INTERVAL_MS) return;
+    this.lastSkipLog.set(s.id, now);
+    const at = new Date(now).toISOString();
+    Promise.resolve(this.deps.recordRun(s, { status: 'skipped', cause: this.cause(s, ctx), steps: [], error: reason, started_at: at, finished_at: at }))
+      .catch((e) => this.deps.log.error?.(`recordRun: ${e.message}`));
+  }
+
   /** Возвращает промис выполнения или null, если запуск пропущен */
   fire(s, ctx) {
     const now = this.deps.now();
     if (!s.enabled) return null;
     if (this.running.has(s.id)) return null;                  // предыдущий запуск ещё идёт (пауза)
     const last = this.lastRunAt.get(s.id);
-    if (!ctx.manual && s.cooldown_sec > 0 && last && now - last < s.cooldown_sec * 1000) return null;
+    if (!ctx.manual && s.cooldown_sec > 0 && last && now - last < s.cooldown_sec * 1000) {
+      this.recordSkip(s, ctx, `пауза между запусками: ${s.cooldown_sec} с`, now);
+      return null;
+    }
     const recent = (this.runLog.get(s.id) || []).filter((t) => now - t < 60_000);
     if (recent.length >= MAX_RUNS_PER_MIN) {
       this.deps.log.warn?.(`scenario ${s.id}: rate limited`);
       this.runLog.set(s.id, recent);
-      return this.deps.saveRun(s, 'Слишком частые запуски: больше 30 в минуту, проверьте условия').catch(() => {});
+      const reason = 'Слишком частые запуски: больше 30 в минуту, проверьте условия';
+      this.recordSkip(s, ctx, reason, now);
+      return this.deps.saveRun(s, reason).catch(() => {});
     }
-    if (!ctx.manual && !this.conditionsHold(s)) return null;
+    if (!ctx.manual && !this.conditionsHold(s)) {
+      this.recordSkip(s, ctx, s.condition_mode === 'any' ? 'ни одно из условий не выполнено' : 'условия не выполнены', now);
+      return null;
+    }
 
     recent.push(now);
     this.runLog.set(s.id, recent);
@@ -236,23 +268,39 @@ export class Engine {
   }
 
   async execute(s, ctx) {
+    const startedAt = new Date(this.deps.now()).toISOString();
+    const steps = [];
     let error = null;
     for (const a of s.actions) {
+      let info = '';
       try {
         if (a.type === 'set') {
+          info = `${this.devices.get(a.device_id)?.name ?? a.device_id} · ${a.property} = ${a.value}`;
           // $meta мог измениться после сохранения сценария — правило то же, что у /commands
           if (!isSettable(this.devices.get(a.device_id)?.meta, a.property)) throw new Error(`свойство ${a.property} не управляемое`);
           await this.deps.publishSet(a.device_id, a.property, a.value);
+        } else if (a.type === 'notify') {
+          info = this.render(a.message, s, ctx);
+          await this.deps.notify(s, a.level, info);
+        } else if (a.type === 'delay') {
+          info = `${a.seconds} с`;
+          await this.deps.sleep(a.seconds * 1000);
         }
-        else if (a.type === 'notify') await this.deps.notify(s, a.level, this.render(a.message, s, ctx));
-        else if (a.type === 'delay') await this.deps.sleep(a.seconds * 1000);
+        steps.push({ type: a.type, ok: true, info: info.slice(0, 300) });
       } catch (e) {
         error = `${a.type}: ${e.message}`;
+        steps.push({ type: a.type, ok: false, info: info.slice(0, 300), error: e.message });
         this.deps.log.error?.(`scenario ${s.id} action ${a.type} failed: ${e.message}`);
         break;
       }
     }
     await this.deps.saveRun(s, error).catch((e) => this.deps.log.error?.(`saveRun: ${e.message}`));
+    if (this.deps.recordRun) {
+      await Promise.resolve(this.deps.recordRun(s, {
+        status: error ? 'error' : 'ok', cause: this.cause(s, ctx), steps, error, started_at: startedAt,
+        finished_at: new Date(this.deps.now()).toISOString(),
+      })).catch((e) => this.deps.log.error?.(`recordRun: ${e.message}`));
+    }
     return error;
   }
 }

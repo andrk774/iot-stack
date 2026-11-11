@@ -1,6 +1,6 @@
 import { HttpError } from '../http.js';
 import { DEVICE_ID_RE } from '../acl.js';
-import { verifyJwt } from '../security.js';
+import { verifyJwt, sha256 } from '../security.js';
 
 const TOUCH_MS = 5 * 60 * 1000;
 
@@ -17,20 +17,56 @@ export async function checkSessionToken(db, config, token) {
   return { userId: payload.sub, sid: payload.sid };
 }
 
+// ---------- персональные API-токены ----------
+export const API_TOKEN_PREFIX = 'iot_';
+export const isApiToken = (t) => typeof t === 'string' && t.startsWith(API_TOKEN_PREFIX) && t.length >= 20 && t.length <= 100;
+
+/** API-токен -> { id, owner_id, scope } или null (нет, истёк, отозван) */
+export async function findApiToken(db, token) {
+  if (!isApiToken(token)) return null;
+  const { rows } = await db.query(
+    `SELECT id, owner_id, scope, last_used_at FROM api_tokens
+     WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())`, [sha256(token)]);
+  const t = rows[0];
+  if (!t) return null;
+  // last_used_at — не чаще раза в минуту: опрос раз в секунду не должен писать в БД на каждый запрос
+  if (!t.last_used_at || Date.now() - new Date(t.last_used_at).getTime() > 60_000) {
+    db.query('UPDATE api_tokens SET last_used_at = now() WHERE id = $1', [t.id]).catch(() => {});
+  }
+  return t;
+}
+
 /**
  * Bearer JWT -> id пользователя или 401. Токен действует, пока жива его сессия:
  * выход, «завершить другие сеансы» и смена пароля отзывают его сразу.
  *   const userId = await auth(req);   const { userId, sid } = await auth.session(req);
+ *
+ * Вместо JWT можно передать персональный API-токен (iot_…): он действует как его владелец,
+ * токен с правом read пропускает только GET. session: true — маршруты только для панели
+ * (аккаунт, сеансы, токены, каналы, участники дома): утёкший API-токен не должен давать их менять.
+ * auth.session() API-токен не принимает никогда — у него нет сеанса.
  */
-export function makeAuth(config, db) {
-  const session = async (req) => {
+export function makeAuth(config, db, { session: sessionOnly = false } = {}) {
+  const bearer = (req) => {
     const h = req.headers.authorization || '';
-    const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+    return h.startsWith('Bearer ') ? h.slice(7) : null;
+  };
+  const session = async (req) => {
+    const token = bearer(req);
+    if (isApiToken(token)) throw new HttpError(403, 'session_required');
     const s = token ? await checkSessionToken(db, config, token) : null;
     if (!s) throw new HttpError(401, 'unauthorized');
     return s;
   };
-  const auth = async (req) => (await session(req)).userId;
+  const auth = async (req) => {
+    const token = bearer(req);
+    if (!isApiToken(token)) return (await session(req)).userId;
+    if (sessionOnly) throw new HttpError(403, 'session_required');
+    const t = await findApiToken(db, token);
+    if (!t) throw new HttpError(401, 'unauthorized');
+    if (t.scope !== 'write' && req.method !== 'GET') throw new HttpError(403, 'token_read_only');
+    return t.owner_id;
+  };
   auth.session = session;
   return auth;
 }

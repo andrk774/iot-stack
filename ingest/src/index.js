@@ -6,6 +6,7 @@ import { parseMessage } from './parse.js';
 import { IngestBuffer } from './buffer.js';
 import { writeBatch } from './write.js';
 import { Journal } from './journal.js';
+import { Metrics, serveMetrics } from '../../shared/metrics.js';
 
 const env = process.env;
 for (const k of ['DATABASE_URL', 'MQTT_PASSWORD']) {
@@ -26,10 +27,29 @@ if (recovered.length) console.log(`journal: восстановлено ${recover
 let flushing = false;
 let written = 0;
 let rejected = 0;
+let flushFailures = 0;
+let journalErrors = 0;
+let messages = 0;
+let lastFlushMs = 0;
+
+// ---------- метрики (http://ingest:9100/metrics внутри docker-сети; снаружи — через /metrics бэкенда) ----------
+const metrics = new Metrics();
+metrics.counterFn('iot_ingest_messages_total', 'Сообщений получено из брокера', () => messages);
+metrics.counterFn('iot_ingest_written_rows_total', 'Точек телеметрии записано в БД', () => written);
+metrics.counterFn('iot_ingest_rejected_rows_total', 'Строк, отклонённых БД (неверные данные)', () => rejected);
+metrics.counterFn('iot_ingest_dropped_rows_total', 'Точек выброшено из-за переполнения буфера', () => buffer.dropped);
+metrics.counterFn('iot_ingest_flush_failures_total', 'Неудачных сбросов в БД (пачка возвращена в буфер)', () => flushFailures);
+metrics.counterFn('iot_ingest_journal_errors_total', 'Ошибок записи журнала на диск', () => journalErrors);
+metrics.gaugeFn('iot_ingest_buffered_rows', 'Точек в буфере, ждут записи', () => buffer.rows.length);
+metrics.gaugeFn('iot_ingest_journal_bytes', 'Размер журнала на диске (данные, ещё не записанные в БД)', () => journal.bytes);
+metrics.gaugeFn('iot_ingest_last_flush_seconds', 'Длительность последнего сброса в БД', () => lastFlushMs / 1000);
+metrics.gaugeFn('iot_ingest_mqtt_connected', 'Подключение ingest к брокеру (1/0)', () => (client.connected ? 1 : 0));
+serveMetrics(metrics, Number(env.METRICS_PORT || 9100));
 
 async function flush() {
   if (flushing || buffer.size === 0) return;
   flushing = true;
+  const started = Date.now();
   const batch = buffer.take();
   const seq = journal.rotate(); // файл журнала = ровно эта пачка (take и rotate идут подряд, без await)
   const client = await db.connect().catch((e) => {
@@ -44,10 +64,12 @@ async function flush() {
     rejected += res.dropped.length;
     journal.commit(seq);
   } catch (e) {
+    flushFailures++;
     console.error(`flush failed (${batch.rows.length} rows requeued):`, e.message);
     buffer.restore(batch);
   } finally {
     client?.release();
+    lastFlushMs = Date.now() - started;
     flushing = false;
   }
 }
@@ -78,12 +100,14 @@ client.on('error', (e) => console.error('mqtt error', e.message));
 
 // Обработчик синхронный: событие попадает в журнал до того, как mqtt.js отправит PUBACK
 client.on('message', (topic, payload) => {
+  messages++;
   const ev = parseMessage(topic, payload);
   if (!ev) return;
   const now = new Date();
   try {
     journal.append(ev, now);
   } catch (e) {
+    journalErrors++;
     console.error('journal append failed', e.message);
   }
   buffer.add(ev, now);
